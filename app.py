@@ -6,8 +6,8 @@ Run:
     python3 app.py
 
 Upload:
-    curl -T ./backup.tar.gz http://allenflux.tech/upload/backup.tar.gz
-    curl -F "file=@./backup.tar.gz" http://allenflux.tech/upload
+    curl -T ./backup.tar.gz http://allenflux.tech:8090/upload/backup.tar.gz
+    curl -F "file=@./backup.tar.gz" http://allenflux.tech:8090/upload
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 DEFAULT_MAX_UPLOAD_MB = 1024
 DEFAULT_PORT = 8090
-DEFAULT_PUBLIC_URL = "http://allenflux.tech"
+DEFAULT_PUBLIC_URL = "http://allenflux.tech:8090"
 CHUNK_SIZE = 1024 * 1024
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 

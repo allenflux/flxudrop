@@ -12,12 +12,12 @@ It only uses the Python standard library.
 python3 app.py
 ```
 
-By default FluxDrop listens on port `8090`, stores files under `./data`, and returns download links using `http://allenflux.tech`.
+By default FluxDrop listens on port `8090`, stores files under `./data`, and returns download links using `http://allenflux.tech:8090`.
 
 Explicit start command:
 
 ```bash
-FLUXDROP_PUBLIC_URL=http://allenflux.tech python3 app.py --host 0.0.0.0 --port 8090
+FLUXDROP_PUBLIC_URL=http://allenflux.tech:8090 python3 app.py --host 0.0.0.0 --port 8090
 ```
 
 ## Docker Compose Deploy
@@ -38,20 +38,20 @@ Stop:
 docker compose down
 ```
 
-The compose file maps host port `8090` to container port `8090`, stores uploaded files in the Docker volume `fluxdrop-data`, and returns links under `http://allenflux.tech`.
+The compose file maps host port `8090` to container port `8090`, stores uploaded files in the Docker volume `fluxdrop-data`, and returns links under `http://allenflux.tech:8090`.
 
 ## Upload With Curl
 
 Best for large files:
 
 ```bash
-curl -T ./backup.tar.gz http://allenflux.tech/upload/backup.tar.gz
+curl -T ./backup.tar.gz http://allenflux.tech:8090/upload/backup.tar.gz
 ```
 
 Also supported:
 
 ```bash
-curl -F "file=@./backup.tar.gz" http://allenflux.tech/upload
+curl -F "file=@./backup.tar.gz" http://allenflux.tech:8090/upload
 ```
 
 The response looks like:
@@ -62,15 +62,15 @@ The response looks like:
   "file_id": "abc123...",
   "filename": "backup.tar.gz",
   "size": 12345,
-  "download_url": "http://allenflux.tech/f/abc123.../backup.tar.gz",
-  "curl": "curl -L -o backup.tar.gz http://allenflux.tech/f/abc123.../backup.tar.gz"
+  "download_url": "http://allenflux.tech:8090/f/abc123.../backup.tar.gz",
+  "curl": "curl -L -o backup.tar.gz http://allenflux.tech:8090/f/abc123.../backup.tar.gz"
 }
 ```
 
 ## Download
 
 ```bash
-curl -L -O "http://allenflux.tech/f/FILE_ID/backup.tar.gz"
+curl -L -O "http://allenflux.tech:8090/f/FILE_ID/backup.tar.gz"
 ```
 
 ## Configuration
@@ -82,7 +82,7 @@ Environment variables:
 | `FLUXDROP_HOST` | `0.0.0.0` | Listen host |
 | `FLUXDROP_PORT` | `8090` | Listen port |
 | `FLUXDROP_STORAGE_DIR` | `./data` | Storage directory |
-| `FLUXDROP_PUBLIC_URL` | `http://allenflux.tech` | Public base URL returned in upload responses, useful behind nginx or a tunnel |
+| `FLUXDROP_PUBLIC_URL` | `http://allenflux.tech:8090` | Public base URL returned in upload responses, useful behind nginx or a tunnel |
 | `FLUXDROP_UPLOAD_TOKEN` | empty | Optional upload token |
 | `FLUXDROP_MAX_UPLOAD_MB` | `1024` | Max upload size in MB |
 
@@ -91,7 +91,7 @@ With upload protection:
 ```bash
 export FLUXDROP_UPLOAD_TOKEN='change-me'
 python3 app.py
-curl -H 'Authorization: Bearer change-me' -T ./file.log http://allenflux.tech/upload/file.log
+curl -H 'Authorization: Bearer change-me' -T ./file.log http://allenflux.tech:8090/upload/file.log
 ```
 
 ## Run As A Systemd Service
@@ -108,7 +108,7 @@ WorkingDirectory=/opt/fluxdrop
 ExecStart=/usr/bin/python3 /opt/fluxdrop/app.py --host 0.0.0.0 --port 8090
 Restart=always
 Environment=FLUXDROP_STORAGE_DIR=/var/lib/fluxdrop
-Environment=FLUXDROP_PUBLIC_URL=http://allenflux.tech
+Environment=FLUXDROP_PUBLIC_URL=http://allenflux.tech:8090
 Environment=FLUXDROP_UPLOAD_TOKEN=change-me
 
 [Install]
