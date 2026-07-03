@@ -8,7 +8,7 @@ import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from app import FluxDropConfig, make_handler, sanitize_filename
+from app import FluxDropConfig, infer_extension_from_sample, make_handler, sanitize_filename
 
 
 class FluxDropTests(unittest.TestCase):
@@ -38,7 +38,7 @@ class FluxDropTests(unittest.TestCase):
         return conn.getresponse()
 
     def test_put_upload_returns_downloadable_link(self) -> None:
-        payload = b"hello from fluxdrop\n"
+        payload = b"2026-07-03 11:20:01 INFO hello from fluxdrop\n"
         response = self.request(
             "PUT",
             "/upload",
@@ -49,7 +49,7 @@ class FluxDropTests(unittest.TestCase):
         self.assertEqual(response.status, 201)
         data = json.loads(response.read())
         self.assertTrue(data["ok"])
-        self.assertEqual(data["filename"], "upload.bin")
+        self.assertEqual(data["filename"], "upload.log")
         self.assertEqual(data["size"], len(payload))
 
         download_path = "/" + data["download_url"].split("/", 3)[3]
@@ -99,6 +99,12 @@ class FluxDropTests(unittest.TestCase):
     def test_filename_is_sanitized(self) -> None:
         self.assertEqual(sanitize_filename("../weird/name?.txt"), "name_.txt")
         self.assertEqual(sanitize_filename(""), "upload.bin")
+
+    def test_extension_is_inferred_from_content(self) -> None:
+        self.assertEqual(infer_extension_from_sample(b'{"ok": true}\n'), "json")
+        self.assertEqual(infer_extension_from_sample(b"col_a,col_b\n1,2\n"), "csv")
+        self.assertEqual(infer_extension_from_sample(b"2026-07-03 11:00:00 ERROR failed\n"), "log")
+        self.assertEqual(infer_extension_from_sample(b"%PDF-1.7\n"), "pdf")
 
 
 if __name__ == "__main__":

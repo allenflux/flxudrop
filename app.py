@@ -37,6 +37,9 @@ DEFAULT_PORT = 8090
 DEFAULT_PUBLIC_URL = "http://allenflux.tech:8090"
 CHUNK_SIZE = 1024 * 1024
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+LOG_LINE_RE = re.compile(
+    rb"(\b(ERROR|WARN|WARNING|INFO|DEBUG|TRACE|FATAL)\b|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
+)
 
 
 @dataclass
@@ -75,6 +78,63 @@ def sanitize_filename(name: str | None) -> str:
     name = SAFE_FILENAME_RE.sub("_", name)
     name = name.strip(" .")
     return name[:180] or "upload.bin"
+
+
+def is_probably_text(sample: bytes) -> bool:
+    if not sample:
+        return True
+    if b"\x00" in sample:
+        return False
+    printable = sum(1 for byte in sample if byte in b"\n\r\t" or 32 <= byte <= 126)
+    return printable / len(sample) > 0.85
+
+
+def infer_extension_from_sample(sample: bytes, content_type: str | None = None) -> str:
+    content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if content_type and content_type not in {"application/octet-stream", "binary/octet-stream"}:
+        guessed = mimetypes.guess_extension(content_type)
+        if guessed:
+            return guessed.lstrip(".").replace("jpe", "jpg")
+
+    if sample.startswith(b"\x1f\x8b"):
+        return "gz"
+    if sample.startswith(b"PK\x03\x04"):
+        return "zip"
+    if sample.startswith(b"%PDF-"):
+        return "pdf"
+    if sample.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if sample.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if sample.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if sample.startswith(b"Rar!\x1a\x07"):
+        return "rar"
+    if sample.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return "7z"
+
+    stripped = sample.lstrip()
+    if stripped.startswith((b"{", b"[")):
+        return "json"
+    if stripped.startswith((b"<?xml", b"<root", b"<xml")):
+        return "xml"
+    if stripped.lower().startswith((b"<!doctype html", b"<html")):
+        return "html"
+    if is_probably_text(sample):
+        if LOG_LINE_RE.search(sample):
+            return "log"
+        if b"," in sample and b"\n" in sample:
+            return "csv"
+        return "txt"
+    return "bin"
+
+
+def filename_or_inferred(filename: str | None, path: Path, content_type: str | None = None) -> str:
+    if filename:
+        return sanitize_filename(filename)
+    with path.open("rb") as source:
+        sample = source.read(8192)
+    return f"upload.{infer_extension_from_sample(sample, content_type)}"
 
 
 def get_config() -> FluxDropConfig:
@@ -220,7 +280,8 @@ class FluxDropHandler(BaseHTTPRequestHandler):
                 length,
                 self.config.max_upload_bytes,
             )
-            stored = store_file(self.config, sanitize_filename(filename), temp_path, size)
+            guessed_filename = filename_or_inferred(filename, temp_path, self.headers.get("Content-Type"))
+            stored = store_file(self.config, guessed_filename, temp_path, size)
             self.send_upload_response(stored)
         except OverflowError as exc:
             temp_path.unlink(missing_ok=True)
@@ -257,12 +318,13 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.BAD_REQUEST, "Multipart field 'file' was not found")
             return
 
-        filename = sanitize_filename(part.get_filename())
+        filename = part.get_filename()
         payload = part.get_payload(decode=True) or b""
         temp_path = self.config.storage_dir / f".upload-{secrets.token_hex(12)}.tmp"
         try:
             temp_path.write_bytes(payload)
-            stored = store_file(self.config, filename, temp_path, len(payload))
+            guessed_filename = filename_or_inferred(filename, temp_path, part.get_content_type())
+            stored = store_file(self.config, guessed_filename, temp_path, len(payload))
             self.send_upload_response(stored)
         except OSError as exc:
             temp_path.unlink(missing_ok=True)

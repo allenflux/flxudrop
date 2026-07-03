@@ -48,6 +48,8 @@ Best for large files:
 curl -T ./backup.tar.gz http://allenflux.tech:8090/upload
 ```
 
+When no filename is sent, FluxDrop infers the suffix from the file content and returns names like `upload.log`, `upload.json`, `upload.zip`, or `upload.txt`.
+
 If you want the download filename to be kept:
 
 ```bash
@@ -66,10 +68,10 @@ The response looks like:
 {
   "ok": true,
   "file_id": "abc123...",
-  "filename": "backup.tar.gz",
+  "filename": "upload.log",
   "size": 12345,
-  "download_url": "http://allenflux.tech:8090/f/abc123.../backup.tar.gz",
-  "curl": "curl -L -o backup.tar.gz http://allenflux.tech:8090/f/abc123.../backup.tar.gz"
+  "download_url": "http://allenflux.tech:8090/f/abc123.../upload.log",
+  "curl": "curl -L -o upload.log http://allenflux.tech:8090/f/abc123.../upload.log"
 }
 ```
 
