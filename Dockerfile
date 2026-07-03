@@ -1,0 +1,15 @@
+FROM python:3.13-slim
+
+ENV PYTHONUNBUFFERED=1
+ENV FLUXDROP_HOST=0.0.0.0
+ENV FLUXDROP_PORT=8090
+ENV FLUXDROP_STORAGE_DIR=/data
+ENV FLUXDROP_PUBLIC_URL=http://allenflux.tech
+
+WORKDIR /app
+
+COPY app.py /app/app.py
+
+EXPOSE 8090
+
+CMD ["python3", "/app/app.py"]

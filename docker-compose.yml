@@ -1,0 +1,20 @@
+services:
+  fluxdrop:
+    build: .
+    container_name: fluxdrop
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+    environment:
+      FLUXDROP_HOST: "0.0.0.0"
+      FLUXDROP_PORT: "8090"
+      FLUXDROP_STORAGE_DIR: "/data"
+      FLUXDROP_PUBLIC_URL: "http://allenflux.tech"
+      # 建议部署到公网后打开上传 token：
+      # FLUXDROP_UPLOAD_TOKEN: "change-me"
+      FLUXDROP_MAX_UPLOAD_MB: "1024"
+    volumes:
+      - fluxdrop-data:/data
+
+volumes:
+  fluxdrop-data:
