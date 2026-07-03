@@ -41,7 +41,7 @@ class FluxDropTests(unittest.TestCase):
         payload = b"hello from fluxdrop\n"
         response = self.request(
             "PUT",
-            "/upload/example.txt",
+            "/upload",
             payload,
             {"Content-Length": str(len(payload))},
         )
@@ -49,13 +49,29 @@ class FluxDropTests(unittest.TestCase):
         self.assertEqual(response.status, 201)
         data = json.loads(response.read())
         self.assertTrue(data["ok"])
-        self.assertEqual(data["filename"], "example.txt")
+        self.assertEqual(data["filename"], "upload.bin")
         self.assertEqual(data["size"], len(payload))
 
         download_path = "/" + data["download_url"].split("/", 3)[3]
         download = self.request("GET", download_path)
         self.assertEqual(download.status, 200)
         self.assertEqual(download.read(), payload)
+
+    def test_put_upload_can_take_filename_from_header(self) -> None:
+        payload = b"named file\n"
+        response = self.request(
+            "PUT",
+            "/upload",
+            payload,
+            {
+                "Content-Length": str(len(payload)),
+                "X-Filename": "example.txt",
+            },
+        )
+
+        self.assertEqual(response.status, 201)
+        data = json.loads(response.read())
+        self.assertEqual(data["filename"], "example.txt")
 
     def test_token_is_required_when_configured(self) -> None:
         self.config.upload_token = "secret"

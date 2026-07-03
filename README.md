@@ -45,7 +45,13 @@ The compose file maps host port `8090` to container port `8090`, stores uploaded
 Best for large files:
 
 ```bash
-curl -T ./backup.tar.gz http://allenflux.tech:8090/upload/backup.tar.gz
+curl -T ./backup.tar.gz http://allenflux.tech:8090/upload
+```
+
+If you want the download filename to be kept:
+
+```bash
+curl -H "X-Filename: backup.tar.gz" -T ./backup.tar.gz http://allenflux.tech:8090/upload
 ```
 
 Also supported:
@@ -91,7 +97,7 @@ With upload protection:
 ```bash
 export FLUXDROP_UPLOAD_TOKEN='change-me'
 python3 app.py
-curl -H 'Authorization: Bearer change-me' -T ./file.log http://allenflux.tech:8090/upload/file.log
+curl -H 'Authorization: Bearer change-me' -T ./file.log http://allenflux.tech:8090/upload
 ```
 
 ## Run As A Systemd Service

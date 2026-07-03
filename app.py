@@ -6,7 +6,7 @@ Run:
     python3 app.py
 
 Upload:
-    curl -T ./backup.tar.gz http://allenflux.tech:8090/upload/backup.tar.gz
+    curl -T ./backup.tar.gz http://allenflux.tech:8090/upload
     curl -F "file=@./backup.tar.gz" http://allenflux.tech:8090/upload
 """
 
@@ -184,12 +184,15 @@ class FluxDropHandler(BaseHTTPRequestHandler):
 
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
-        if not parsed.path.startswith("/upload/"):
-            self.send_error_json(HTTPStatus.NOT_FOUND, "Use PUT /upload/<filename>")
+        if parsed.path == "/upload":
+            filename = self.headers.get("X-Filename")
+        elif parsed.path.startswith("/upload/"):
+            filename = parsed.path.removeprefix("/upload/")
+        else:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "Use PUT /upload")
             return
         if not self.check_upload_auth():
             return
-        filename = parsed.path.removeprefix("/upload/")
         self.handle_stream_upload(filename)
 
     def check_upload_auth(self) -> bool:
