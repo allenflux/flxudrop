@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import secrets
 import tempfile
 import threading
 import unittest
+import zipfile
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlencode
 
 import app
 from app import FluxDropConfig, make_handler
@@ -48,7 +51,7 @@ class ManagementTests(unittest.TestCase):
         return json.loads(response.read())["files"]
 
     def test_homepage_and_assets_are_served_without_exposing_token(self) -> None:
-        for path, content_type in (("/", "text/html"), ("/static/app.css", "text/css"), ("/static/app.js", "text/javascript"), ("/static/favicon.svg", "image/svg+xml")):
+        for path, content_type in (("/", "text/html"), ("/static/app.css", "text/css"), ("/static/app.js", "text/javascript"), ("/static/file-actions.mjs", "text/javascript"), ("/static/i18n.mjs", "text/javascript"), ("/static/favicon.svg", "image/svg+xml")):
             with self.subTest(path=path):
                 response = self.request("GET", path)
                 self.assertEqual(response.status, 200)
@@ -250,6 +253,95 @@ class ManagementTests(unittest.TestCase):
                 resume.set()
             self.assertEqual(download.status, 200)
             self.assertEqual(download.read(), payload)
+
+    def zip_request(self, ids):
+        return self.request("GET", "/api/files/download?" + urlencode([("file_id", file_id) for file_id in ids]))
+
+    def test_bulk_download_streams_files_with_known_ids_without_token(self) -> None:
+        first = self.upload("one.txt", b"first payload")
+        second = self.upload("two.bin", bytes(range(256)))
+        response = self.zip_request([first["file_id"], second["file_id"]])
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "application/zip")
+        self.assertIn('filename="fluxdrop-files.zip"', response.getheader("Content-Disposition"))
+        self.assertIsNone(response.getheader("Content-Length"))
+        with zipfile.ZipFile(io.BytesIO(response.read())) as archive:
+            self.assertEqual(archive.read("one.txt"), b"first payload")
+            self.assertEqual(archive.read("two.bin"), bytes(range(256)))
+            self.assertTrue(all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist()))
+            self.assertTrue(all(info.extract_version >= 45 for info in archive.infolist()))
+
+    def test_bulk_download_keeps_colliding_names_and_deduplicates_ids(self) -> None:
+        uploads = [self.upload(name, content) for name, content in (
+            ("a.txt", b"one"), ("A.txt", b"two"), ("a%20(2).txt", b"three"),
+        )]
+        response = self.zip_request([item["file_id"] for item in uploads] + [uploads[0]["file_id"]])
+        self.assertEqual(response.status, 200)
+        with zipfile.ZipFile(io.BytesIO(response.read())) as archive:
+            names = archive.namelist()
+            self.assertEqual(len(names), 3)
+            self.assertEqual(len({name.casefold() for name in names}), 3)
+            self.assertEqual([archive.read(name) for name in names], [b"one", b"two", b"three"])
+
+    def test_bulk_download_sanitizes_archive_paths(self) -> None:
+        stored = self.upload()
+        path = self.config.meta_dir / f'{stored["file_id"]}.json'
+        metadata = json.loads(path.read_text())
+        metadata["filename"] = "../../outside.txt"
+        path.write_text(json.dumps(metadata))
+        response = self.zip_request([stored["file_id"]])
+        self.assertEqual(response.status, 200)
+        with zipfile.ZipFile(io.BytesIO(response.read())) as archive:
+            self.assertEqual(archive.namelist(), ["outside.txt"])
+
+    def test_bulk_download_rejects_invalid_or_excessive_selections(self) -> None:
+        for ids in ([], [""], ["../outside"], ["x" * 15], ["x" * 65], ["x" * 22] * 101):
+            with self.subTest(ids=ids[:2]):
+                response = self.zip_request(ids)
+                self.assertEqual(response.status, 400)
+                self.assertFalse(json.loads(response.read())["ok"])
+        response = self.request("GET", "/api/files/download?unknown=value")
+        self.assertEqual(response.status, 400)
+        response.read()
+
+    def test_bulk_download_rejects_missing_files_before_zip_headers(self) -> None:
+        stored = self.upload()
+        response = self.zip_request([stored["file_id"], "x" * 22])
+        self.assertEqual(response.status, 404)
+        self.assertIn("application/json", response.getheader("Content-Type"))
+        self.assertFalse(json.loads(response.read())["ok"])
+        (self.config.files_dir / stored["file_id"]).unlink()
+        response = self.zip_request([stored["file_id"]])
+        self.assertEqual(response.status, 404)
+        response.read()
+
+    def test_bulk_download_completes_when_open_files_are_deleted(self) -> None:
+        first = self.upload("one.txt", b"one")
+        second = self.upload("two.txt", b"two")
+        opened = threading.Event()
+        resume = threading.Event()
+        copy = app.shutil.copyfileobj
+
+        def wait_then_copy(source, target, **kwargs):
+            opened.set()
+            if not resume.wait(3):
+                raise TimeoutError("test deletion did not complete")
+            return copy(source, target, **kwargs)
+
+        with mock.patch("app.shutil.copyfileobj", side_effect=wait_then_copy):
+            try:
+                download = self.zip_request([first["file_id"], second["file_id"]])
+                self.assertEqual(download.status, 200)
+                self.assertTrue(opened.wait(2))
+                for item in (first, second):
+                    deletion = self.request("DELETE", f'/api/files/{item["file_id"]}', headers=self.headers)
+                    self.assertEqual(deletion.status, 200)
+                    deletion.read()
+            finally:
+                resume.set()
+            with zipfile.ZipFile(io.BytesIO(download.read())) as archive:
+                self.assertEqual(archive.read("one.txt"), b"one")
+                self.assertEqual(archive.read("two.txt"), b"two")
 
 
 if __name__ == "__main__":

@@ -5,52 +5,71 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="查看、下载和管理 FluxDrop 中已上传的文件。">
   <title>FluxDrop</title>
-  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/static/favicon.svg?v=fd-blue" type="image/svg+xml">
   <link rel="stylesheet" href="/static/app.css">
-  <script src="/static/app.js" defer></script>
+  <script src="/static/app.js" type="module"></script>
 </head>
 <body>
   <header class="page-heading">
     <h1>FluxDrop</h1>
-    <button id="logout" class="button" hidden>锁定页面</button>
+    <div class="header-actions">
+      <label class="language-label" for="language"><span data-i18n="language">语言</span></label>
+      <select id="language"><option value="zh">中文</option><option value="en">English</option></select>
+      <button id="logout" class="button" data-i18n="lock" hidden>锁定页面</button>
+    </div>
   </header>
   <main>
-    <section aria-labelledby="page-title">
-      <div class="panel-heading"><h2 id="page-title">文件目录</h2><button id="refresh" class="button" disabled>刷新列表</button></div>
-      <p id="summary" class="muted">查看和管理已上传的文件</p>
-      <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
-      <div id="auth-panel" class="auth-panel" hidden>
-        <h2 id="auth-title">解锁文件管理</h2>
-        <p id="auth-description" class="muted">使用服务器配置的上传令牌，查看和删除文件。</p>
-        <form id="auth-form">
-          <label for="token">管理令牌</label>
-          <div class="input-row"><input id="token" name="token" type="password" autocomplete="off" placeholder="输入 FLUXDROP_UPLOAD_TOKEN" required><button id="unlock" class="button primary" type="submit">解锁</button></div>
-          <p class="field-help">令牌仅保存在当前页面，刷新或锁定后需重新输入。</p>
-        </form>
-      </div>
-      <div id="loading-state" class="empty-state" role="status">正在加载文件列表…</div>
-      <div id="empty-state" class="empty-state" hidden><h2>还没有上传文件</h2><p class="muted">上传完成后，点击“刷新列表”即可查看。</p></div>
-      <div id="table-wrap" class="table-wrap" hidden>
-        <table>
-          <thead><tr><th scope="col">文件名</th><th scope="col">大小</th><th scope="col">上传时间</th><th scope="col" class="actions-heading">操作</th></tr></thead>
-          <tbody id="file-list"></tbody>
-        </table>
-      </div>
-    </section>
     <section class="upload-help" aria-labelledby="upload-title">
-      <h2 id="upload-title">上传文件</h2>
+      <h2 id="upload-title" data-i18n="upload">上传文件</h2>
       <pre><code id="upload-example">curl -T ./file.log http://allenflux.tech:8090/upload/file.log</code></pre>
       <pre><code id="multipart-example">curl -F "file=@./file.log" http://allenflux.tech:8090/upload</code></pre>
     </section>
-    <noscript><p class="notice">请启用 JavaScript，以加载文件列表和使用删除功能。</p></noscript>
+    <section aria-labelledby="page-title">
+      <div class="panel-heading"><h2 id="page-title" data-i18n="directory">文件目录</h2><button id="refresh" class="button" disabled>刷新列表</button></div>
+      <p id="summary" class="muted">查看和管理已上传的文件</p>
+      <div id="selection-bar" class="selection-bar" hidden>
+        <label class="select-all-label"><input id="select-all" type="checkbox"><span data-i18n="selectPage">全选本页</span></label>
+        <span id="selection-count" class="muted" aria-live="polite">已选 0 个</span>
+        <div class="batch-actions">
+          <a id="bulk-download" class="button" href="#" target="download-frame" aria-disabled="true" data-i18n="bulkDownload">批量下载</a>
+          <button id="bulk-delete" class="button" disabled data-i18n="bulkDelete">批量删除</button>
+        </div>
+      </div>
+      <div id="auth-panel" class="auth-panel" hidden>
+        <h2 data-i18n="authTitle">解锁文件管理</h2>
+        <p class="muted" data-i18n="authDescription">使用服务器配置的上传令牌，查看和删除文件。</p>
+        <form id="auth-form">
+          <label for="token" data-i18n="token">管理令牌</label>
+          <div class="input-row"><input id="token" name="token" type="password" autocomplete="off" data-i18n-placeholder="tokenPlaceholder" placeholder="输入 FLUXDROP_UPLOAD_TOKEN" required><button id="unlock" class="button" type="submit" data-i18n="unlock">解锁</button></div>
+          <p class="field-help" data-i18n="tokenHint">令牌仅保存在当前页面，刷新或锁定后需重新输入。</p>
+        </form>
+      </div>
+      <div id="loading-state" class="empty-state" role="status" data-i18n="loadingFiles">正在加载文件列表…</div>
+      <div id="empty-state" class="empty-state" hidden><h2 data-i18n="emptyTitle">还没有上传文件</h2><p class="muted" data-i18n="emptyHint">上传完成后，点击“刷新列表”即可查看。</p></div>
+      <div id="table-wrap" class="table-wrap" hidden>
+        <table>
+          <thead><tr><th scope="col" data-i18n="fileName">文件名</th><th scope="col" data-i18n="size">大小</th><th scope="col" data-i18n="uploaded">上传时间</th><th scope="col" class="actions-heading" data-i18n="actions">操作</th></tr></thead>
+          <tbody id="file-list"></tbody>
+        </table>
+      </div>
+      <nav id="pagination" class="pagination" aria-label="文件分页" hidden>
+        <button id="previous-page" class="button" data-i18n="previous">上一页</button>
+        <span id="page-info" class="muted" aria-live="polite"></span>
+        <button id="next-page" class="button" data-i18n="next">下一页</button>
+      </nav>
+      <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+      <p id="removed-hint" class="muted" hidden></p>
+    </section>
+    <noscript><p class="notice">请启用 JavaScript。 / Enable JavaScript to manage files.</p></noscript>
   </main>
   <footer lang="en">by Allen Flux</footer>
-  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-filename delete-description">
+  <iframe id="download-frame" name="download-frame" title="文件下载" hidden></iframe>
+  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description">
     <h2 id="delete-title">删除这个文件？</h2>
-    <p id="delete-filename" class="delete-filename"></p>
-    <p id="delete-description" class="muted">文件将从服务器永久删除，下载链接也会失效。此操作无法撤销。</p>
+    <ul id="delete-filename" class="delete-filename"></ul>
+    <p id="delete-description" class="muted" data-i18n="deleteDescription">文件将从服务器永久删除，下载链接也会失效。此操作无法撤销。</p>
     <p id="delete-error" class="notice error" role="alert" hidden></p>
-    <div class="dialog-actions"><button id="cancel-delete" class="button">取消</button><button id="confirm-delete" class="button danger">确认删除</button></div>
+    <div class="dialog-actions"><button id="cancel-delete" class="button" data-i18n="cancel">取消</button><button id="confirm-delete" class="button danger">确认删除</button></div>
   </dialog>
 </body>
 </html>

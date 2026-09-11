@@ -22,6 +22,8 @@ import shutil
 import sys
 import tempfile
 import time
+import zipfile
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +38,7 @@ DEFAULT_MAX_UPLOAD_MB = 1024
 DEFAULT_PORT = 8090
 DEFAULT_PUBLIC_URL = "http://allenflux.tech:8090"
 CHUNK_SIZE = 1024 * 1024
+MAX_BULK_DOWNLOAD_FILES = 100
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -43,6 +46,8 @@ STATIC_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/app.css": ("app.css", "text/css; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/static/file-actions.mjs": ("file-actions.mjs", "text/javascript; charset=utf-8"),
+    "/static/i18n.mjs": ("i18n.mjs", "text/javascript; charset=utf-8"),
     "/static/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
 LOG_LINE_RE = re.compile(
@@ -95,6 +100,18 @@ def is_probably_text(sample: bytes) -> bool:
         return False
     printable = sum(1 for byte in sample if byte in b"\n\r\t" or 32 <= byte <= 126)
     return printable / len(sample) > 0.85
+
+
+def archive_filename(filename: str, used_names: set[str]) -> str:
+    name = sanitize_filename(filename)
+    stem, suffix = Path(name).stem, Path(name).suffix
+    candidate = name
+    number = 2
+    while candidate.casefold() in used_names:
+        candidate = f"{stem} ({number}){suffix}"
+        number += 1
+    used_names.add(candidate.casefold())
+    return candidate
 
 
 def infer_extension_from_sample(sample: bytes, content_type: str | None = None) -> str:
@@ -255,6 +272,9 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             if self.check_management_auth():
                 self.send_file_list()
             return
+        if parsed.path == "/api/files/download":
+            self.send_bulk_download(parsed.query)
+            return
         if parsed.path.startswith("/f/"):
             self.send_download(parsed.path)
             return
@@ -325,6 +345,59 @@ class FluxDropHandler(BaseHTTPRequestHandler):
 
     def check_management_auth(self) -> bool:
         return self.check_upload_auth()
+
+    def send_bulk_download(self, query: str) -> None:
+        try:
+            params = parse_qs(query, keep_blank_values=True, max_num_fields=MAX_BULK_DOWNLOAD_FILES)
+            file_ids = list(dict.fromkeys(params.get("file_id", [])))
+            if set(params) != {"file_id"} or not file_ids or any(not FILE_ID_RE.fullmatch(file_id) for file_id in file_ids):
+                raise ValueError("Invalid file selection")
+        except ValueError:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "Select between 1 and 100 valid file IDs")
+            return
+
+        # Like individual download links, this endpoint only needs known file IDs.
+        # Open all files before sending headers so deletion cannot truncate a ZIP.
+        with ExitStack() as stack:
+            entries = []
+            used_names: set[str] = set()
+            try:
+                for file_id in file_ids:
+                    stored = load_metadata(self.config, file_id)
+                    if stored is None:
+                        raise FileNotFoundError(file_id)
+                    source = stack.enter_context((self.config.files_dir / file_id).open("rb"))
+                    info = zipfile.ZipInfo(
+                        archive_filename(stored.filename, used_names),
+                        time.gmtime(max(315532800, min(stored.created_at, 4354819198)))[:6],
+                    )
+                    info.file_size = os.fstat(source.fileno()).st_size
+                    info.external_attr = 0o100600 << 16
+                    entries.append((info, source))
+            except FileNotFoundError:
+                self.send_error_json(HTTPStatus.NOT_FOUND, "One or more selected files no longer exist; refresh the file list")
+                return
+            except OSError as exc:
+                self.log_error("Could not open selected files: %s", exc)
+                self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not read selected files")
+                return
+
+            self.close_connection = True
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="fluxdrop-files.zip"')
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            try:
+                # ZIP_STORED avoids compression overhead and buffering large files.
+                with zipfile.ZipFile(self.wfile, "w", compression=zipfile.ZIP_STORED) as archive:
+                    for info, source in entries:
+                        with archive.open(info, "w", force_zip64=True) as target:
+                            shutil.copyfileobj(source, target, length=CHUNK_SIZE)
+            except OSError as exc:
+                self.log_error("Bulk download interrupted: %s", exc)
 
     def send_file_list(self) -> None:
         files = []

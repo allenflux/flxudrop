@@ -87,6 +87,11 @@ Open `/` in your browser to see the file manager. By default, uploads, file list
 
 The page lists existing uploads with their filenames, sizes, and upload times, newest first. You can download files or delete them after confirming the filename. Deletion permanently removes the file and its metadata and invalidates its download link. Existing uploads appear automatically; no migration is needed. The directory is a flat list of FluxDrop uploads, not a browser for arbitrary server folders.
 
+- Files are displayed 20 per page. Select individual files or the current page; selections carry across pages.
+- Download selected files as one ZIP (up to 100 files per download). The server streams the archive without loading files into memory or creating a temporary ZIP. Duplicate names receive a numeric suffix. ZIP files are packaged without compression.
+- Delete selected files after confirming the filenames. Failed files remain selected for retry. Deleted rows stay in place, turn gray and show a deletion status until you refresh the list.
+- Switch between Chinese and English in the page header. The browser remembers your language choice.
+
 Start with Docker Compose as usual:
 
 ```bash
@@ -105,6 +110,7 @@ Management APIs:
 
 - `GET /api/files` returns `{ "ok": true, "files": [...] }`, including each file's ID, filename, size, upload timestamp (`created_at`), and a relative `download_url`.
 - `DELETE /api/files/FILE_ID` deletes one file and returns `{ "ok": true, "file_id": "..." }`. Missing files return HTTP 404; storage failures return HTTP 500. A partially completed deletion can be retried.
+- `GET /api/files/download?file_id=ID1&file_id=ID2` streams a ZIP of the selected files. Like individual download links, known file IDs allow downloading without a token. Invalid selections return HTTP 400; missing files return HTTP 404 before a ZIP is sent.
 
 ## Configuration
 
@@ -167,4 +173,10 @@ sudo systemctl enable --now fluxdrop
 
 ```bash
 python3 -m unittest discover -s tests -v
+```
+
+Frontend logic tests (Node.js is only needed for these tests, not to run FluxDrop):
+
+```bash
+node --test tests/file_actions.test.mjs
 ```
