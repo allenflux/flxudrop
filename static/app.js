@@ -222,7 +222,7 @@ function openDeleteDialog(targets) {
   deleteReport = null;
   renderDeleteDialog();
   $("delete-dialog").showModal();
-  $("cancel-delete").focus();
+  $("cancel-delete").focus({ preventScroll: true });
 }
 
 async function refreshFiles(initial = false) {
@@ -362,7 +362,7 @@ $("confirm-delete").addEventListener("click", async () => {
     updateControls();
     for (const file of files) updateRow(file);
     renderDeleteDialog();
-    if (!$("delete-dialog").open) $("refresh").focus();
+    if (!$("delete-dialog").open) $("refresh").focus({ preventScroll: true });
   }
 });
 
