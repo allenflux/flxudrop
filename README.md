@@ -42,7 +42,7 @@ The compose file maps host port `8090` to container port `8090`, stores uploaded
 
 ## Upload With Curl
 
-Best for large files:
+Upload directly (streams to disk):
 
 ```bash
 curl -T ./backup.tar.gz http://allenflux.tech:8090/upload
@@ -56,7 +56,7 @@ If you want the download filename to be kept:
 curl -H "X-Filename: backup.tar.gz" -T ./backup.tar.gz http://allenflux.tech:8090/upload
 ```
 
-Also supported:
+Multipart form uploads also stream to disk, including large files:
 
 ```bash
 curl -F "file=@./backup.tar.gz" http://allenflux.tech:8090/upload
@@ -81,6 +81,26 @@ The response looks like:
 curl -L -O "http://allenflux.tech:8090/f/FILE_ID/backup.tar.gz"
 ```
 
+## File Management UI
+
+Open `/` in your browser to see the file manager. Set `FLUXDROP_UPLOAD_TOKEN` on the server, restart the service, and enter that token in the page to unlock it. The token is kept only in page memory; reloading or locking the page clears it.
+
+The page lists existing uploads with their filenames, sizes, and upload times, newest first. You can download files or delete them after confirming the filename. Deletion permanently removes the file and its metadata and invalidates its download link. Existing uploads appear automatically; no migration is needed. The directory is a flat list of FluxDrop uploads, not a browser for arbitrary server folders.
+
+To enable management with Docker Compose:
+
+```bash
+export FLUXDROP_UPLOAD_TOKEN='replace-with-a-long-random-token'
+docker compose up -d --build
+```
+
+The same token then protects uploads. If it is unset, management APIs return HTTP 503 and the page explains how to enable them; uploads retain their existing optional-token behavior.
+
+Management APIs accept `Authorization: Bearer TOKEN` or `X-Upload-Token: TOKEN`:
+
+- `GET /api/files` returns `{ "ok": true, "files": [...] }`, including each file's ID, filename, size, upload timestamp (`created_at`), and a relative `download_url`.
+- `DELETE /api/files/FILE_ID` deletes one file and returns `{ "ok": true, "file_id": "..." }`. Missing files return HTTP 404; storage failures return HTTP 500. A partially completed deletion can be retried.
+
 ## Configuration
 
 Environment variables:
@@ -91,8 +111,8 @@ Environment variables:
 | `FLUXDROP_PORT` | `8090` | Listen port |
 | `FLUXDROP_STORAGE_DIR` | `./data` | Storage directory |
 | `FLUXDROP_PUBLIC_URL` | `http://allenflux.tech:8090` | Public base URL returned in upload responses, useful behind nginx or a tunnel |
-| `FLUXDROP_UPLOAD_TOKEN` | empty | Optional upload token |
-| `FLUXDROP_MAX_UPLOAD_MB` | `1024` | Max upload size in MB |
+| `FLUXDROP_UPLOAD_TOKEN` | empty | Optional for uploads; required to list and delete files in the UI or API |
+| `FLUXDROP_MAX_UPLOAD_MB` | `1024` | Max request body size in MB, including multipart headers and boundaries |
 
 With upload protection:
 
@@ -134,5 +154,13 @@ sudo systemctl enable --now fluxdrop
 
 - Download links are public if someone knows the URL.
 - Use `FLUXDROP_UPLOAD_TOKEN` if the service is exposed to the internet.
-- Use `curl -T` for large files because it streams directly to disk.
-# flxudrop
+- Both `curl -T` and `curl -F` stream uploads to disk with bounded memory use.
+- Multipart part headers are limited to 16 KiB. File parts use raw bytes; Base64 and quoted-printable transfer encodings are rejected.
+- Uploads require `Content-Length`; chunked transfer encoding is not supported. Curl supplies the length when uploading a regular file with either command above.
+- Incomplete or malformed uploads are rejected and temporary files are removed. Storage failures are logged on the server and return HTTP 500.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```

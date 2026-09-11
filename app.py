@@ -13,9 +13,6 @@ Upload:
 from __future__ import annotations
 
 import argparse
-import email.parser
-import email.policy
-import html
 import json
 import mimetypes
 import os
@@ -23,6 +20,7 @@ import re
 import secrets
 import shutil
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
@@ -31,12 +29,21 @@ from pathlib import Path
 from typing import BinaryIO
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from fluxdrop_multipart import read_multipart_to_file
+
 
 DEFAULT_MAX_UPLOAD_MB = 1024
 DEFAULT_PORT = 8090
 DEFAULT_PUBLIC_URL = "http://allenflux.tech:8090"
 CHUNK_SIZE = 1024 * 1024
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_ROUTES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/static/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
 LOG_LINE_RE = re.compile(
     rb"(\b(ERROR|WARN|WARNING|INFO|DEBUG|TRACE|FATAL)\b|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
 )
@@ -173,17 +180,42 @@ def read_exactly_to_file(
 
 def save_metadata(config: FluxDropConfig, stored: StoredFile) -> None:
     meta_path = config.meta_dir / f"{stored.file_id}.json"
-    meta_path.write_text(json.dumps(asdict(stored), ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=config.meta_dir,
+            prefix=f".{stored.file_id}.",
+            suffix=".tmp",
+            delete=False,
+        ) as target:
+            temp_path = Path(target.name)
+            json.dump(asdict(stored), target, ensure_ascii=False, indent=2)
+        os.replace(temp_path, meta_path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def load_metadata(config: FluxDropConfig, file_id: str) -> StoredFile | None:
     meta_path = config.meta_dir / f"{file_id}.json"
-    if not meta_path.exists():
-        return None
     try:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
-        return StoredFile(**data)
-    except (OSError, TypeError, json.JSONDecodeError):
+        stored = StoredFile(**data)
+        if (
+            stored.file_id != file_id
+            or not isinstance(stored.filename, str)
+            or not stored.filename
+            or type(stored.size) is not int
+            or stored.size < 0
+            or type(stored.created_at) is not int
+            or not 0 <= stored.created_at <= 253402300799
+        ):
+            return None
+        stored.filename.encode("utf-8")
+        return stored
+    except (OSError, TypeError, UnicodeError, json.JSONDecodeError):
         return None
 
 
@@ -198,7 +230,11 @@ def store_file(config: FluxDropConfig, filename: str, temp_path: Path, size: int
         size=size,
         created_at=int(time.time()),
     )
-    save_metadata(config, stored)
+    try:
+        save_metadata(config, stored)
+    except Exception:
+        final_path.unlink(missing_ok=True)
+        raise
     return stored
 
 
@@ -211,8 +247,12 @@ class FluxDropHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/":
-            self.send_home()
+        if parsed.path in STATIC_ROUTES:
+            self.send_static(parsed.path)
+            return
+        if parsed.path == "/api/files":
+            if self.check_management_auth():
+                self.send_file_list()
             return
         if parsed.path.startswith("/f/"):
             self.send_download(parsed.path)
@@ -221,6 +261,9 @@ class FluxDropHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in STATIC_ROUTES:
+            self.send_static(parsed.path)
+            return
         if parsed.path.startswith("/f/"):
             self.send_download(parsed.path, head_only=True)
             return
@@ -234,13 +277,12 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         if not self.check_upload_auth():
             return
 
-        content_type = self.headers.get("Content-Type", "")
-        if content_type.startswith("multipart/form-data"):
-            self.handle_multipart_upload()
+        if self.headers.get_content_type() == "multipart/form-data":
+            self.handle_upload(multipart=True)
         else:
             query = parse_qs(parsed.query)
             filename = query.get("filename", [None])[0] or self.headers.get("X-Filename")
-            self.handle_stream_upload(filename)
+            self.handle_upload(filename)
 
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
@@ -253,7 +295,59 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             return
         if not self.check_upload_auth():
             return
-        self.handle_stream_upload(filename)
+        self.handle_upload(filename)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith("/api/files/"):
+            self.send_error_json(HTTPStatus.NOT_FOUND, "Not found")
+            return
+        if not self.check_management_auth():
+            return
+        file_id = parsed.path.removeprefix("/api/files/")
+        if not FILE_ID_RE.fullmatch(file_id):
+            self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
+            return
+        if load_metadata(self.config, file_id) is None:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
+            return
+        try:
+            # Remove data first so a failed unlink leaves a usable metadata record.
+            # A retry can also clean up metadata left by a partial deletion.
+            (self.config.files_dir / file_id).unlink(missing_ok=True)
+            (self.config.meta_dir / f"{file_id}.json").unlink(missing_ok=True)
+        except OSError as exc:
+            self.log_error("Could not delete file %s: %s", file_id, exc)
+            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not complete file deletion")
+            return
+        self.send_json(HTTPStatus.OK, {"ok": True, "file_id": file_id})
+
+    def check_management_auth(self) -> bool:
+        if not self.config.upload_token:
+            self.send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, "Configure FLUXDROP_UPLOAD_TOKEN to enable file management")
+            return False
+        return self.check_upload_auth()
+
+    def send_file_list(self) -> None:
+        files = []
+        try:
+            for meta_path in self.config.meta_dir.glob("*.json"):
+                file_id = meta_path.stem
+                if not FILE_ID_RE.fullmatch(file_id):
+                    continue
+                stored = load_metadata(self.config, file_id)
+                if stored is None or not (self.config.files_dir / file_id).is_file():
+                    continue
+                files.append({
+                    **asdict(stored),
+                    "download_url": f"/f/{file_id}/{quote(stored.filename, safe='')}",
+                })
+        except OSError as exc:
+            self.log_error("Could not list files: %s", exc)
+            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not list files")
+            return
+        files.sort(key=lambda item: (item["created_at"], item["file_id"]), reverse=True)
+        self.send_json(HTTPStatus.OK, {"ok": True, "files": files})
 
     def check_upload_auth(self) -> bool:
         token = self.config.upload_token
@@ -262,84 +356,74 @@ class FluxDropHandler(BaseHTTPRequestHandler):
 
         auth = self.headers.get("Authorization", "")
         header_token = self.headers.get("X-Upload-Token", "")
-        if auth == f"Bearer {token}" or header_token == token:
+        if (
+            secrets.compare_digest(auth.encode("utf-8"), f"Bearer {token}".encode("utf-8"))
+            or secrets.compare_digest(header_token.encode("utf-8"), token.encode("utf-8"))
+        ):
             return True
         self.send_error_json(HTTPStatus.UNAUTHORIZED, "Missing or invalid upload token")
         return False
 
-    def handle_stream_upload(self, filename: str | None) -> None:
+    def handle_upload(self, filename: str | None = None, *, multipart: bool = False) -> None:
         length = self.parse_content_length()
         if length is None:
             return
 
         temp_path = self.config.storage_dir / f".upload-{secrets.token_hex(12)}.tmp"
         try:
-            size = read_exactly_to_file(
-                self.rfile,
-                temp_path,
-                length,
-                self.config.max_upload_bytes,
-            )
-            guessed_filename = filename_or_inferred(filename, temp_path, self.headers.get("Content-Type"))
+            content_type = self.headers.get("Content-Type")
+            if multipart:
+                filename, content_type, size = read_multipart_to_file(
+                    self.rfile, temp_path, length, content_type or ""
+                )
+            else:
+                size = read_exactly_to_file(
+                    self.rfile, temp_path, length, self.config.max_upload_bytes
+                )
+            guessed_filename = filename_or_inferred(filename, temp_path, content_type)
             stored = store_file(self.config, guessed_filename, temp_path, size)
-            self.send_upload_response(stored)
         except OverflowError as exc:
-            temp_path.unlink(missing_ok=True)
             self.send_error_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
-        except (OSError, ValueError) as exc:
-            temp_path.unlink(missing_ok=True)
+            return
+        except ValueError as exc:
             self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
-
-    def handle_multipart_upload(self) -> None:
-        length = self.parse_content_length()
-        if length is None:
             return
-        if length > self.config.max_upload_bytes:
-            self.send_error_json(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                "File is larger than the configured upload limit",
-            )
+        except TimeoutError:
+            self.send_error_json(HTTPStatus.REQUEST_TIMEOUT, "Upload timed out")
             return
-
-        # Multipart uploads are parsed in memory for compatibility with curl -F.
-        # Use PUT /upload/<filename> for large files; that path streams to disk.
-        body = self.rfile.read(length)
-        headers = f"Content-Type: {self.headers.get('Content-Type')}\r\nMIME-Version: 1.0\r\n\r\n"
-        message = email.parser.BytesParser(policy=email.policy.default).parsebytes(
-            headers.encode("utf-8") + body
-        )
-
-        part = None
-        for candidate in message.iter_parts():
-            if candidate.get_filename() or candidate.get_param("name", header="content-disposition") == "file":
-                part = candidate
-                break
-        if part is None:
-            self.send_error_json(HTTPStatus.BAD_REQUEST, "Multipart field 'file' was not found")
+        except ConnectionError as exc:
+            self.log_error("Upload connection closed: %s", exc)
             return
-
-        filename = part.get_filename()
-        payload = part.get_payload(decode=True) or b""
-        temp_path = self.config.storage_dir / f".upload-{secrets.token_hex(12)}.tmp"
-        try:
-            temp_path.write_bytes(payload)
-            guessed_filename = filename_or_inferred(filename, temp_path, part.get_content_type())
-            stored = store_file(self.config, guessed_filename, temp_path, len(payload))
-            self.send_upload_response(stored)
         except OSError as exc:
+            self.log_error("Could not store upload: %s", exc)
+            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not store upload")
+            return
+        finally:
             temp_path.unlink(missing_ok=True)
-            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+        self.send_upload_response(stored)
 
     def parse_content_length(self) -> int | None:
-        raw_length = self.headers.get("Content-Length")
-        if raw_length is None:
+        if self.headers.get("Transfer-Encoding") is not None:
+            self.send_error_json(HTTPStatus.NOT_IMPLEMENTED, "Transfer-Encoding is not supported; use Content-Length")
+            return None
+        lengths = self.headers.get_all("Content-Length", [])
+        if not lengths:
             self.send_error_json(HTTPStatus.LENGTH_REQUIRED, "Content-Length is required")
             return None
+        raw_length = lengths[0].strip(" \t")
+        if len(lengths) != 1 or not re.fullmatch(r"[0-9]+", raw_length):
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
+            return None
         try:
-            return int(raw_length)
+            length = int(raw_length)
         except ValueError:
             self.send_error_json(HTTPStatus.BAD_REQUEST, "Invalid Content-Length")
             return None
+        if length > self.config.max_upload_bytes:
+            self.send_error_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "File is larger than the configured upload limit")
+            return None
+        return length
 
     def send_upload_response(self, stored: StoredFile) -> None:
         download_url = self.build_download_url(stored)
@@ -369,74 +453,64 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             return
 
         file_id = parts[2]
-        if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", file_id):
+        if not FILE_ID_RE.fullmatch(file_id):
             self.send_error_json(HTTPStatus.NOT_FOUND, "Not found")
             return
 
         stored = load_metadata(self.config, file_id)
         file_path = self.config.files_dir / file_id
-        if stored is None or not file_path.exists():
+        if stored is None:
             self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
             return
-
-        content_type = mimetypes.guess_type(stored.filename)[0] or "application/octet-stream"
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(stored.size))
-        self.send_header(
-            "Content-Disposition",
-            "attachment; filename*=UTF-8''%s" % quote(stored.filename),
-        )
-        self.end_headers()
-        if not head_only:
-            with file_path.open("rb") as source:
+        try:
+            source = file_path.open("rb")
+        except FileNotFoundError:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
+            return
+        except OSError as exc:
+            self.log_error("Could not read file %s: %s", file_id, exc)
+            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not read file")
+            return
+        # An open descriptor remains readable if a management request deletes it.
+        with source:
+            content_type = mimetypes.guess_type(stored.filename)[0] or "application/octet-stream"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(os.fstat(source.fileno()).st_size))
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''%s" % quote(stored.filename))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            if not head_only:
                 shutil.copyfileobj(source, self.wfile, length=CHUNK_SIZE)
 
-    def send_home(self) -> None:
-        token_hint = ""
-        if self.config.upload_token:
-            token_hint = " -H 'Authorization: Bearer YOUR_TOKEN'"
-        body = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>FluxDrop</title>
-  <style>
-    body {{ font-family: system-ui, sans-serif; max-width: 760px; margin: 48px auto; padding: 0 20px; line-height: 1.55; }}
-    code, pre {{ background: #f4f4f5; border-radius: 6px; }}
-    code {{ padding: 2px 5px; }}
-    pre {{ padding: 16px; overflow: auto; }}
-  </style>
-</head>
-<body>
-  <h1>FluxDrop</h1>
-  <p>Upload files with curl and get a download link back.</p>
-  <pre>curl{html.escape(token_hint)} -T ./file.tar.gz {html.escape(self.base_url())}/upload/file.tar.gz</pre>
-  <pre>curl{html.escape(token_hint)} -F "file=@./file.tar.gz" {html.escape(self.base_url())}/upload</pre>
-</body>
-</html>
-"""
-        payload = body.encode("utf-8")
+    def send_static(self, request_path: str) -> None:
+        filename, content_type = STATIC_ROUTES[request_path]
+        try:
+            payload = (STATIC_DIR / filename).read_bytes()
+        except OSError:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "Page asset not found")
+            return
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         self.end_headers()
-        self.wfile.write(payload)
-
-    def base_url(self) -> str:
-        if self.config.public_base_url:
-            return self.config.public_base_url
-        host = self.headers.get("Host") or "localhost"
-        return f"http://{host}"
+        if self.command != "HEAD":
+            self.wfile.write(payload)
 
     def send_json(self, status: HTTPStatus, payload: dict[str, object]) -> None:
         raw = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
-        self.wfile.write(raw)
+        if self.command != "HEAD":
+            self.wfile.write(raw)
 
     def send_error_json(self, status: HTTPStatus, message: str) -> None:
         self.send_json(status, {"ok": False, "error": message})

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="查看、下载和管理 FluxDrop 中已上传的文件。">
+  <title>文件管理 · FluxDrop</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/" aria-label="FluxDrop 首页"><span class="brand-mark" aria-hidden="true">F</span>FluxDrop</a>
+      <span class="header-label">文件管理</span>
+      <button id="logout" class="button quiet" hidden>锁定页面</button>
+    </div>
+  </header>
+  <main>
+    <section class="page-heading" aria-labelledby="page-title">
+      <div><p class="eyebrow">文件库</p><h1 id="page-title">文件目录</h1><p id="summary" class="muted">查看和管理已上传的文件</p></div>
+      <button id="refresh" class="button" disabled>刷新列表</button>
+    </section>
+    <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+    <section class="file-panel" aria-label="已上传文件">
+      <div class="panel-heading"><h2>全部文件</h2><span class="muted">按上传时间倒序</span></div>
+      <div id="auth-panel" class="auth-panel">
+        <span class="panel-symbol" aria-hidden="true">F</span>
+        <h2 id="auth-title">解锁文件管理</h2>
+        <p id="auth-description" class="muted">使用服务器配置的上传令牌，查看和删除文件。</p>
+        <form id="auth-form">
+          <label for="token">管理令牌</label>
+          <div class="input-row"><input id="token" name="token" type="password" autocomplete="off" placeholder="输入 FLUXDROP_UPLOAD_TOKEN" required><button id="unlock" class="button primary" type="submit">解锁</button></div>
+          <p class="field-help">令牌仅保存在当前页面，刷新或锁定后需重新输入。</p>
+        </form>
+        <p id="setup-help" class="setup-help" hidden>在服务器设置 <code>FLUXDROP_UPLOAD_TOKEN</code> 并重启服务，即可启用文件管理。</p>
+      </div>
+      <div id="empty-state" class="empty-state" hidden><h2>还没有上传文件</h2><p class="muted">上传完成后，点击“刷新列表”即可查看。</p></div>
+      <div id="table-wrap" class="table-wrap" hidden>
+        <table>
+          <thead><tr><th scope="col">文件名</th><th scope="col">大小</th><th scope="col">上传时间</th><th scope="col" class="actions-heading">操作</th></tr></thead>
+          <tbody id="file-list"></tbody>
+        </table>
+      </div>
+    </section>
+    <details class="upload-help">
+      <summary>通过 curl 上传文件</summary>
+      <p>在终端执行，上传完成后刷新文件列表。</p>
+      <pre><code id="upload-example">curl -H 'Authorization: Bearer YOUR_TOKEN' -T ./file.log http://localhost:8090/upload/file.log</code></pre>
+    </details>
+    <noscript><p class="notice">请启用 JavaScript，以加载文件列表和使用删除功能。</p></noscript>
+  </main>
+  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-filename delete-description">
+    <h2 id="delete-title">删除这个文件？</h2>
+    <p id="delete-filename" class="delete-filename"></p>
+    <p id="delete-description" class="muted">文件将从服务器永久删除，下载链接也会失效。此操作无法撤销。</p>
+    <p id="delete-error" class="notice error" role="alert" hidden></p>
+    <div class="dialog-actions"><button id="cancel-delete" class="button">取消</button><button id="confirm-delete" class="button danger">确认删除</button></div>
+  </dialog>
+</body>
+</html>
