@@ -62,6 +62,16 @@ Multipart form uploads also stream to disk, including large files:
 curl -F "file=@./backup.tar.gz" http://allenflux.tech:8090/upload
 ```
 
+For a log that is still being appended to, use a direct upload and keep its filename:
+
+```bash
+curl --fail-with-body -T ./2026-09-11.log http://allenflux.tech:8090/upload/2026-09-11.log
+```
+
+This uploads the number of bytes present when curl measures the file; later appended lines are not included. If the file may be truncated, rotated, or rewritten during the transfer, upload a stable copy instead.
+
+Avoid `curl -F` on a growing file: curl calculates the multipart `Content-Length` before reading it, so newly appended bytes can push the closing boundary past the declared request length. FluxDrop then returns HTTP 400 with `Multipart body is missing its closing boundary` and removes the incomplete upload. This error is separate from the upload size limit. To keep using `-F`, first make a copy and upload that copy after copying has finished.
+
 The response looks like:
 
 ```json

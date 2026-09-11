@@ -149,6 +149,48 @@ class FluxDropTests(unittest.TestCase):
         self.assertEqual(response.status, 201)
         self.assertEqual(json.loads(response.read())["filename"], "upload.log")
 
+    def test_growing_multipart_upload_returns_guidance_without_storing_partial_file(self) -> None:
+        boundary = b"------------------------curl-boundary"
+        headers = (
+            b"--" + boundary
+            + b'\r\nContent-Disposition: form-data; name="file"; filename="active.log"\r\n'
+            b'Content-Type: application/octet-stream\r\n\r\n'
+        )
+        original = b"original log line\n" * 8192
+        closing = b"\r\n--" + boundary + b"--\r\n"
+        declared_length = len(headers) + len(original) + len(closing)
+        # curl -F calculates Content-Length before reading the file. Appended
+        # lines can displace the closing boundary beyond that declared length.
+        grown_body = headers + original + b"appended log line\n" * 100 + closing
+        response = self.raw_request(
+            "POST",
+            [("Content-Length", str(declared_length)),
+             ("Content-Type", "multipart/form-data; boundary=" + boundary.decode())],
+            grown_body[:declared_length],
+        )
+        self.assertEqual(response.status, 400)
+        result = json.loads(response.read())
+        self.assertFalse(result["ok"])
+        self.assertIn("closing boundary", result["error"])
+        self.assertIn("curl -T", result["error"])
+        self.assert_storage_empty()
+
+    def test_put_upload_keeps_initial_length_when_file_grows(self) -> None:
+        original = b"original log line\n" * 8192
+        response = self.raw_request(
+            "PUT",
+            [("Content-Length", str(len(original))), ("X-Filename", "active.log")],
+            original + b"appended log line\n" * 100,
+        )
+        self.assertEqual(response.status, 201)
+        result = json.loads(response.read())
+        self.assertEqual(result["filename"], "active.log")
+        self.assertEqual(result["size"], len(original))
+        download = self.request("GET", f'/f/{result["file_id"]}/active.log')
+        self.assertEqual(download.status, 200)
+        self.assertEqual(download.read(), original)
+        self.assertEqual(list(self.config.storage_dir.glob(".upload-*.tmp")), [])
+
     def test_malformed_upload_lengths_are_rejected_without_files(self) -> None:
         cases = [
             ([], 411),

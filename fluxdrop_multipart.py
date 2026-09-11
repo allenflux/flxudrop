@@ -50,7 +50,11 @@ class _MultipartReader:
                 count = max(0, len(self.buffer) - len(self.marker) + 1)
                 written += self._emit(count, target)
                 if not self.remaining:
-                    raise ValueError("Multipart body is missing its closing boundary")
+                    raise ValueError(
+                        "Multipart body is missing its closing boundary. "
+                        "If the file is still being written, use curl -T with "
+                        "/upload/<filename> or upload a stable copy."
+                    )
                 self._fill()
                 continue
 
