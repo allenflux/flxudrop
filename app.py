@@ -34,7 +34,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from fluxdrop_multipart import read_multipart_to_file
 
 
-DEFAULT_MAX_UPLOAD_MB = 1024
+DEFAULT_MAX_UPLOAD_MB = 8192
 DEFAULT_PORT = 8090
 DEFAULT_PUBLIC_URL = "http://allenflux.tech:8090"
 CHUNK_SIZE = 1024 * 1024

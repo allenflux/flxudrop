@@ -123,7 +123,7 @@ Environment variables:
 | `FLUXDROP_STORAGE_DIR` | `./data` | Storage directory |
 | `FLUXDROP_PUBLIC_URL` | `http://allenflux.tech:8090` | Public base URL returned in upload responses, useful behind nginx or a tunnel |
 | `FLUXDROP_UPLOAD_TOKEN` | empty | Optional token for uploads, file listing, and deletion; leave unset for the default token-free mode |
-| `FLUXDROP_MAX_UPLOAD_MB` | `1024` | Max request body size in MB, including multipart headers and boundaries |
+| `FLUXDROP_MAX_UPLOAD_MB` | `8192` | Max request body size in MiB (default 8 GiB), including multipart headers and boundaries |
 
 With upload protection:
 

@@ -12,7 +12,7 @@ services:
       FLUXDROP_PUBLIC_URL: "http://allenflux.tech:8090"
       # 可选：默认上传和文件管理均无需令牌。
       # FLUXDROP_UPLOAD_TOKEN: "change-me"
-      FLUXDROP_MAX_UPLOAD_MB: "1024"
+      FLUXDROP_MAX_UPLOAD_MB: "8192"
     volumes:
       - fluxdrop-data:/data
 
