@@ -83,20 +83,25 @@ curl -L -O "http://allenflux.tech:8090/f/FILE_ID/backup.tar.gz"
 
 ## File Management UI
 
-Open `/` in your browser to see the file manager. Set `FLUXDROP_UPLOAD_TOKEN` on the server, restart the service, and enter that token in the page to unlock it. The token is kept only in page memory; reloading or locking the page clears it.
+Open `/` in your browser to see the file manager. By default, uploads, file listing, downloads, and deletion work without a token. The page loads existing files immediately, using the same startup commands as before.
 
 The page lists existing uploads with their filenames, sizes, and upload times, newest first. You can download files or delete them after confirming the filename. Deletion permanently removes the file and its metadata and invalidates its download link. Existing uploads appear automatically; no migration is needed. The directory is a flat list of FluxDrop uploads, not a browser for arbitrary server folders.
 
-To enable management with Docker Compose:
+Start with Docker Compose as usual:
 
 ```bash
-export FLUXDROP_UPLOAD_TOKEN='replace-with-a-long-random-token'
 docker compose up -d --build
 ```
 
-The same token then protects uploads. If it is unset, management APIs return HTTP 503 and the page explains how to enable them; uploads retain their existing optional-token behavior.
+Upload without an authorization header:
 
-Management APIs accept `Authorization: Bearer TOKEN` or `X-Upload-Token: TOKEN`:
+```bash
+curl -T ./file.log http://allenflux.tech:8090/upload/file.log
+```
+
+The original optional `FLUXDROP_UPLOAD_TOKEN` setting remains available. Only when explicitly configured does it protect uploads and management APIs; the page then prompts for it and keeps it only in page memory. Such requests accept `Authorization: Bearer TOKEN` or `X-Upload-Token: TOKEN`.
+
+Management APIs:
 
 - `GET /api/files` returns `{ "ok": true, "files": [...] }`, including each file's ID, filename, size, upload timestamp (`created_at`), and a relative `download_url`.
 - `DELETE /api/files/FILE_ID` deletes one file and returns `{ "ok": true, "file_id": "..." }`. Missing files return HTTP 404; storage failures return HTTP 500. A partially completed deletion can be retried.
@@ -111,7 +116,7 @@ Environment variables:
 | `FLUXDROP_PORT` | `8090` | Listen port |
 | `FLUXDROP_STORAGE_DIR` | `./data` | Storage directory |
 | `FLUXDROP_PUBLIC_URL` | `http://allenflux.tech:8090` | Public base URL returned in upload responses, useful behind nginx or a tunnel |
-| `FLUXDROP_UPLOAD_TOKEN` | empty | Optional for uploads; required to list and delete files in the UI or API |
+| `FLUXDROP_UPLOAD_TOKEN` | empty | Optional token for uploads, file listing, and deletion; leave unset for the default token-free mode |
 | `FLUXDROP_MAX_UPLOAD_MB` | `1024` | Max request body size in MB, including multipart headers and boundaries |
 
 With upload protection:
@@ -137,7 +142,6 @@ ExecStart=/usr/bin/python3 /opt/fluxdrop/app.py --host 0.0.0.0 --port 8090
 Restart=always
 Environment=FLUXDROP_STORAGE_DIR=/var/lib/fluxdrop
 Environment=FLUXDROP_PUBLIC_URL=http://allenflux.tech:8090
-Environment=FLUXDROP_UPLOAD_TOKEN=change-me
 
 [Install]
 WantedBy=multi-user.target

@@ -10,8 +10,8 @@ services:
       FLUXDROP_PORT: "8090"
       FLUXDROP_STORAGE_DIR: "/data"
       FLUXDROP_PUBLIC_URL: "http://allenflux.tech:8090"
-      # 上传及文件管理令牌；未设置时，文件管理功能关闭。
-      FLUXDROP_UPLOAD_TOKEN: "${FLUXDROP_UPLOAD_TOKEN:-}"
+      # 可选：默认上传和文件管理均无需令牌。
+      # FLUXDROP_UPLOAD_TOKEN: "change-me"
       FLUXDROP_MAX_UPLOAD_MB: "1024"
     volumes:
       - fluxdrop-data:/data

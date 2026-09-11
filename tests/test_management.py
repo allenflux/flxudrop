@@ -48,7 +48,7 @@ class ManagementTests(unittest.TestCase):
         return json.loads(response.read())["files"]
 
     def test_homepage_and_assets_are_served_without_exposing_token(self) -> None:
-        for path, content_type in (("/", "text/html"), ("/static/app.css", "text/css"), ("/static/app.js", "text/javascript")):
+        for path, content_type in (("/", "text/html"), ("/static/app.css", "text/css"), ("/static/app.js", "text/javascript"), ("/static/favicon.svg", "image/svg+xml")):
             with self.subTest(path=path):
                 response = self.request("GET", path)
                 self.assertEqual(response.status, 200)
@@ -65,14 +65,32 @@ class ManagementTests(unittest.TestCase):
             self.assertEqual(response.status, 404)
             response.read()
 
-    def test_management_requires_configured_token(self) -> None:
-        stored = self.upload()
+    def test_upload_list_download_and_delete_work_without_token(self) -> None:
         self.config.upload_token = None
-        for method, path in (("GET", "/api/files"), ("DELETE", f'/api/files/{stored["file_id"]}')):
-            response = self.request(method, path, headers=self.headers)
-            self.assertEqual(response.status, 503)
-            self.assertIn("FLUXDROP_UPLOAD_TOKEN", json.loads(response.read())["error"])
-        self.assertTrue((self.config.files_dir / stored["file_id"]).is_file())
+        upload = self.request("PUT", "/upload/file.log", b"example log\n")
+        self.assertEqual(upload.status, 201)
+        stored = json.loads(upload.read())
+        for _ in range(2):
+            response = self.request("GET", "/api/files")
+            self.assertEqual(response.status, 200)
+            files = json.loads(response.read())["files"]
+            self.assertEqual([file["file_id"] for file in files], [stored["file_id"]])
+        download = self.request("GET", files[0]["download_url"])
+        self.assertEqual(download.status, 200)
+        self.assertEqual(download.read(), b"example log\n")
+        response = self.request("DELETE", f'/api/files/{stored["file_id"]}')
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(response.read())["ok"])
+        self.assertFalse((self.config.files_dir / stored["file_id"]).exists())
+        self.assertFalse((self.config.meta_dir / f'{stored["file_id"]}.json').exists())
+        listing = self.request("GET", "/api/files")
+        self.assertEqual(json.loads(listing.read())["files"], [])
+
+    def test_empty_token_also_allows_management(self) -> None:
+        self.config.upload_token = ""
+        response = self.request("GET", "/api/files")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.read())["files"], [])
 
     def test_wrong_or_missing_token_cannot_list_or_delete(self) -> None:
         stored = self.upload()

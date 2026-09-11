@@ -43,6 +43,7 @@ STATIC_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/app.css": ("app.css", "text/css; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/static/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
 LOG_LINE_RE = re.compile(
     rb"(\b(ERROR|WARN|WARNING|INFO|DEBUG|TRACE|FATAL)\b|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
@@ -323,9 +324,6 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.OK, {"ok": True, "file_id": file_id})
 
     def check_management_auth(self) -> bool:
-        if not self.config.upload_token:
-            self.send_error_json(HTTPStatus.SERVICE_UNAVAILABLE, "Configure FLUXDROP_UPLOAD_TOKEN to enable file management")
-            return False
         return self.check_upload_auth()
 
     def send_file_list(self) -> None:

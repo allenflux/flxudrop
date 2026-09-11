@@ -2,6 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 let token = "";
+let authRequired = false;
 let files = [];
 let selectedFile = null;
 let revision = 0;
@@ -38,26 +39,31 @@ async function api(path, method = "GET") {
   } finally { clearTimeout(timer); }
 }
 
-function lock(unconfigured = false) {
+function updateUploadExample() {
+  const auth = authRequired ? " -H 'Authorization: Bearer YOUR_TOKEN'" : "";
+  $("upload-example").textContent = `curl${auth} -T ./file.log ${location.origin}/upload/file.log`;
+  $("multipart-example").textContent = `curl${auth} -F "file=@./file.log" ${location.origin}/upload`;
+}
+
+function lock() {
   revision++;
+  authRequired = true;
   token = "";
   files = [];
   $("token").value = "";
   $("file-list").replaceChildren();
   $("table-wrap").hidden = true;
   $("empty-state").hidden = true;
+  $("loading-state").hidden = true;
   $("auth-panel").hidden = false;
   $("logout").hidden = true;
   $("refresh").disabled = true;
   $("refresh").textContent = "刷新列表";
   $("unlock").disabled = false;
-  $("auth-form").hidden = unconfigured;
-  $("setup-help").hidden = !unconfigured;
-  $("auth-title").textContent = unconfigured ? "文件管理尚未启用" : "解锁文件管理";
-  $("auth-description").textContent = unconfigured ? "配置管理令牌后，即可查看和删除已有文件。" : "使用服务器配置的上传令牌，查看和删除文件。";
   $("summary").textContent = "查看和管理已上传的文件";
   $("delete-dialog").close();
   selectedFile = null;
+  updateUploadExample();
 }
 
 function renderFiles() {
@@ -68,11 +74,6 @@ function renderFiles() {
     const nameCell = document.createElement("td");
     const name = document.createElement("div");
     name.className = "file-name";
-    const type = document.createElement("span");
-    type.className = "file-type";
-    type.setAttribute("aria-hidden", "true");
-    const extension = file.filename.includes(".") ? file.filename.split(".").pop() : "FILE";
-    type.textContent = extension.slice(0, 4).toUpperCase() || "FILE";
     const info = document.createElement("div");
     info.className = "file-info";
     const title = document.createElement("strong");
@@ -81,7 +82,7 @@ function renderFiles() {
     id.className = "file-id";
     id.textContent = file.file_id;
     info.append(title, id);
-    name.append(type, info);
+    name.append(info);
     nameCell.append(name);
     const size = document.createElement("td");
     size.className = "file-size";
@@ -128,27 +129,28 @@ async function refreshFiles(initial = false) {
   $("refresh").disabled = true;
   $("refresh").textContent = "正在加载…";
   $("unlock").disabled = true;
+  $("loading-state").hidden = files.length > 0 || !$("auth-panel").hidden;
   notice();
   try {
     const data = await api("/api/files");
     if (current !== revision) return;
     files = data.files;
     $("auth-panel").hidden = true;
-    $("logout").hidden = false;
+    $("logout").hidden = !authRequired;
     $("token").value = "";
     renderFiles();
   } catch (error) {
     if (current !== revision) return;
-    if (error.status === 503) lock(true);
-    else if (error.status === 401) {
+    if (error.status === 401) {
       lock();
       if (!initial) { notice("令牌无效或已失效，请重新输入。", true); $("token").focus(); }
     } else notice("无法加载文件列表，请检查连接后重试。", true);
   } finally {
     if (current === revision) {
       $("refresh").textContent = "刷新列表";
-      $("refresh").disabled = !token;
+      $("refresh").disabled = authRequired && !token;
       $("unlock").disabled = false;
+      $("loading-state").hidden = true;
     }
   }
 }
@@ -183,9 +185,9 @@ $("confirm-delete").addEventListener("click", async () => {
     $("refresh").focus();
   } catch (error) {
     if (current !== revision) return;
-    if (error.status === 401 || error.status === 503) {
-      lock(error.status === 503);
-      notice("管理令牌已失效或管理功能已停用，请重新验证。", true);
+    if (error.status === 401) {
+      lock();
+      notice("管理令牌已失效，请重新验证。", true);
     } else if (error.status === 404) {
       files = files.filter((item) => item.file_id !== file.file_id);
       renderFiles();
@@ -203,10 +205,10 @@ $("confirm-delete").addEventListener("click", async () => {
     $("confirm-delete").textContent = "确认删除";
     if (current === revision) {
       $("refresh").textContent = "刷新列表";
-      $("refresh").disabled = !token;
+      $("refresh").disabled = authRequired && !token;
     }
   }
 });
 
-$("upload-example").textContent = `curl -H 'Authorization: Bearer YOUR_TOKEN' -T ./file.log ${location.origin}/upload/file.log`;
+updateUploadExample();
 refreshFiles(true);
