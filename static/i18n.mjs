@@ -1,7 +1,7 @@
 export const messages = {
   zh: {
     uploadHint: "从电脑选择文件，或直接拖入页面。支持同时上传多个文件。",
-    dropTitle: "拖拽文件到这里", dropHint: "松开即可上传并生成下载链接", chooseFiles: "选择文件", curlUpload: "使用命令行上传",
+    dropTitle: "拖拽文件到这里", dropHint: "松开即可上传并生成下载链接", chooseFiles: "选择文件", curlUpload: "使用命令行上传", dragUpload: "拖拽上传",
     writeText: "写入或粘贴文本", textHint: "粘贴笔记、日志或代码，保存为文件后即可下载和分享。",
     textContent: "文本内容", textFilenamePlaceholder: "例如 note.txt、config.json", textPlaceholder: "在这里输入，或直接粘贴内容…",
     saveText: "保存并生成链接", close: "关闭", copyLink: "复制下载链接", copyManual: "自动复制不可用，请选中下面的链接复制。",
@@ -43,7 +43,7 @@ export const messages = {
   },
   en: {
     uploadHint: "Choose files from your computer, or drop them onto this page. Multiple files are welcome.",
-    dropTitle: "Drop files here", dropHint: "Release to upload and create download links", chooseFiles: "Choose files", curlUpload: "Upload with curl",
+    dropTitle: "Drop files here", dropHint: "Release to upload and create download links", chooseFiles: "Choose files", curlUpload: "Upload with curl", dragUpload: "Drag and drop upload",
     writeText: "Write or paste text", textHint: "Paste notes, logs or code. Save as a file to download and share.",
     textContent: "Text content", textFilenamePlaceholder: "e.g. note.txt, config.json", textPlaceholder: "Type here, or paste your content…",
     saveText: "Save and create link", close: "Close", copyLink: "Copy download link", copyManual: "Automatic copying is unavailable. Select and copy the link below.",

@@ -19,9 +19,14 @@
     </div>
   </header>
   <main>
+    <section class="upload-help" aria-labelledby="upload-title">
+      <h2 id="upload-title" data-i18n="curlUpload">使用命令行上传</h2>
+      <pre><code id="upload-example">curl -T ./file.log http://allenflux.tech:8090/upload/file.log</code></pre>
+      <pre><code id="multipart-example">curl -F "file=@./file.log" http://allenflux.tech:8090/upload</code></pre>
+    </section>
     <div class="create-grid">
-      <section class="create-panel" aria-labelledby="upload-title">
-        <h2 id="upload-title" data-i18n="upload">上传文件</h2>
+      <section class="create-panel" aria-labelledby="drag-upload-title">
+        <h2 id="drag-upload-title" data-i18n="dragUpload">拖拽上传</h2>
         <p class="field-help" data-i18n="uploadHint">从电脑选择文件，或直接拖入页面。支持同时上传多个文件。</p>
         <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-labelledby="drop-title" aria-describedby="drop-hint" aria-disabled="true">
           <span class="drop-icon" aria-hidden="true">↑</span>
@@ -30,11 +35,6 @@
         </div>
         <input id="file-input" type="file" multiple hidden>
         <button id="choose-files" class="button" type="button" data-i18n="chooseFiles" disabled>选择文件</button>
-        <details class="curl-help">
-          <summary data-i18n="curlUpload">使用命令行上传</summary>
-          <pre><code id="upload-example">curl -T ./file.log http://allenflux.tech:8090/upload/file.log</code></pre>
-          <pre><code id="multipart-example">curl -F "file=@./file.log" http://allenflux.tech:8090/upload</code></pre>
-        </details>
       </section>
       <section class="create-panel" aria-labelledby="text-title">
         <h2 id="text-title" data-i18n="writeText">写入或粘贴文本</h2>

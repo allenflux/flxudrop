@@ -72,7 +72,7 @@ dialog::backdrop { background: #0005; }
 .delete-filename li + li { margin-top: 6px; }
 #delete-description { font-size: .875rem; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
-.create-grid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 24px; }
+.create-grid { display: grid; grid-template-columns: 1fr 1.2fr; align-items: start; gap: 24px; }
 .create-panel { min-width: 0; padding: 20px; border: 1px solid #e5e5e5; border-radius: 8px; }
 .create-panel > .field-help { margin: 8px 0 16px; }
 .drop-zone { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 172px; padding: 24px 12px; margin-bottom: 12px; border: 1px dashed #aeb8c7; border-radius: 6px; background: #fafbfc; text-align: center; cursor: pointer; }
@@ -81,10 +81,6 @@ dialog::backdrop { background: #0005; }
 .drop-zone strong { font-size: .9375rem; font-weight: 500; }
 .drop-icon { font-size: 2rem; line-height: 1; color: #466083; margin-bottom: 12px; }
 .drop-zone .field-help { margin-top: 6px; }
-.curl-help { margin-top: 18px; color: #666; font-size: .8125rem; }
-.curl-help summary { cursor: pointer; }
-.curl-help pre { padding: 10px; }
-.curl-help code { font-size: .75rem; }
 .text-content-label { margin-top: 12px; }
 textarea { display: block; width: 100%; min-height: 158px; resize: vertical; padding: 10px 12px; border: 1px solid #bbb; border-radius: 4px; background: #fff; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .875rem; line-height: 1.55; tab-size: 2; }
 .editor-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
