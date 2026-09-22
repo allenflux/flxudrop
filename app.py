@@ -13,6 +13,7 @@ Upload:
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import mimetypes
 import os
@@ -38,6 +39,8 @@ DEFAULT_MAX_UPLOAD_MB = 8192
 DEFAULT_PORT = 8090
 DEFAULT_PUBLIC_URL = "http://allenflux.tech:8090"
 CHUNK_SIZE = 1024 * 1024
+PREVIEW_SAMPLE_BYTES = 8192
+MAX_TEXT_PREVIEW_BYTES = 256 * 1024
 MAX_BULK_DOWNLOAD_FILES = 100
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,64}")
@@ -47,12 +50,92 @@ STATIC_ROUTES = {
     "/static/app.css": ("app.css", "text/css; charset=utf-8"),
     "/static/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/static/file-actions.mjs": ("file-actions.mjs", "text/javascript; charset=utf-8"),
+    "/static/browser-upload.mjs": ("browser-upload.mjs", "text/javascript; charset=utf-8"),
+    "/static/file-preview.mjs": ("file-preview.mjs", "text/javascript; charset=utf-8"),
     "/static/i18n.mjs": ("i18n.mjs", "text/javascript; charset=utf-8"),
     "/static/favicon.svg": ("favicon.svg", "image/svg+xml"),
 }
 LOG_LINE_RE = re.compile(
     rb"(\b(ERROR|WARN|WARNING|INFO|DEBUG|TRACE|FATAL)\b|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})"
 )
+PREVIEW_MEDIA_TYPES = {
+    ".png": ("image", "image/png"),
+    ".jpg": ("image", "image/jpeg"),
+    ".jpeg": ("image", "image/jpeg"),
+    ".gif": ("image", "image/gif"),
+    ".webp": ("image", "image/webp"),
+    ".avif": ("image", "image/avif"),
+    ".bmp": ("image", "image/bmp"),
+    ".ico": ("image", "image/x-icon"),
+    ".pdf": ("pdf", "application/pdf"),
+    ".mp3": ("audio", "audio/mpeg"),
+    ".wav": ("audio", "audio/wav"),
+    ".ogg": ("audio", "audio/ogg"),
+    ".oga": ("audio", "audio/ogg"),
+    ".opus": ("audio", "audio/ogg"),
+    ".m4a": ("audio", "audio/mp4"),
+    ".aac": ("audio", "audio/aac"),
+    ".flac": ("audio", "audio/flac"),
+    ".mp4": ("video", "video/mp4"),
+    ".m4v": ("video", "video/mp4"),
+    ".webm": ("video", "video/webm"),
+    ".ogv": ("video", "video/ogg"),
+    ".mov": ("video", "video/quicktime"),
+}
+PREVIEW_TEXT_EXTENSIONS = {
+    ".txt", ".text", ".log", ".md", ".markdown", ".csv", ".tsv",
+    ".json", ".jsonl", ".ndjson", ".yaml", ".yml", ".toml", ".ini",
+    ".conf", ".cfg", ".env", ".xml", ".svg", ".html", ".htm",
+    ".xhtml", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".css",
+    ".scss", ".less", ".py", ".sh", ".bash", ".zsh", ".sql", ".go",
+    ".rs", ".java", ".c", ".h", ".cpp", ".hpp", ".rb", ".php",
+    ".swift", ".kt", ".vue", ".svelte", ".ipynb", ".patch", ".diff",
+}
+
+
+def classify_preview(filename: str, sample: bytes) -> tuple[str, str]:
+    suffix = Path(filename).suffix.lower()
+    if suffix in PREVIEW_MEDIA_TYPES:
+        return PREVIEW_MEDIA_TYPES[suffix]
+    if suffix in PREVIEW_TEXT_EXTENSIONS:
+        return "text", "text/plain; charset=utf-8"
+    try:
+        # A fixed-size sample can end in the middle of a UTF-8 character.
+        text = codecs.getincrementaldecoder("utf-8")("strict").decode(sample, final=False)
+    except UnicodeDecodeError:
+        return "unsupported", "application/octet-stream"
+    if not sample or (text and all(char in "\n\r\t" or (ord(char) >= 32 and not 127 <= ord(char) < 160) for char in text)):
+        return "text", "text/plain; charset=utf-8"
+    return "unsupported", "application/octet-stream"
+
+
+def preview_metadata(config: FluxDropConfig, stored: StoredFile) -> dict[str, str]:
+    try:
+        with (config.files_dir / stored.file_id).open("rb") as source:
+            preview_type, _ = classify_preview(stored.filename, source.read(PREVIEW_SAMPLE_BYTES))
+    except OSError:
+        preview_type = "unsupported"
+    return {
+        "preview_type": preview_type,
+        "preview_url": f"/p/{stored.file_id}/{quote(stored.filename, safe='')}",
+    }
+
+
+def parse_byte_range(value: str, size: int) -> tuple[int, int]:
+    match = re.fullmatch(r"bytes=([0-9]*)-([0-9]*)", value.strip())
+    if not match or not any(match.groups()) or size == 0:
+        raise ValueError("Invalid byte range")
+    first, last = match.groups()
+    if not first:
+        suffix = int(last)
+        if suffix == 0:
+            raise ValueError("Invalid byte range")
+        return max(0, size - suffix), size - 1
+    start = int(first)
+    end = min(int(last), size - 1) if last else size - 1
+    if start >= size or end < start:
+        raise ValueError("Unsatisfiable byte range")
+    return start, end
 
 
 @dataclass
@@ -278,6 +361,9 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/f/"):
             self.send_download(parsed.path)
             return
+        if parsed.path.startswith("/p/"):
+            self.send_preview(parsed.path)
+            return
         self.send_error_json(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_HEAD(self) -> None:
@@ -287,6 +373,9 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             return
         if parsed.path.startswith("/f/"):
             self.send_download(parsed.path, head_only=True)
+            return
+        if parsed.path.startswith("/p/"):
+            self.send_preview(parsed.path, head_only=True)
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -412,6 +501,7 @@ class FluxDropHandler(BaseHTTPRequestHandler):
                 files.append({
                     **asdict(stored),
                     "download_url": f"/f/{file_id}/{quote(stored.filename, safe='')}",
+                    **preview_metadata(self.config, stored),
                 })
         except OSError as exc:
             self.log_error("Could not list files: %s", exc)
@@ -505,6 +595,7 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             "size": stored.size,
             "download_url": download_url,
             "curl": f"curl -L -o {quote(stored.filename)} {download_url}",
+            **preview_metadata(self.config, stored),
         }
         self.send_json(HTTPStatus.CREATED, response)
 
@@ -553,6 +644,114 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if not head_only:
                 shutil.copyfileobj(source, self.wfile, length=CHUNK_SIZE)
+
+    def send_preview_security_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
+
+    def send_preview_error(self, status: HTTPStatus, message: str, size: int | None = None) -> None:
+        raw = json.dumps({"ok": False, "error": message}).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        if size is not None:
+            self.send_header("Content-Range", f"bytes */{size}")
+            self.send_header("Accept-Ranges", "bytes")
+        self.send_preview_security_headers()
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(raw)
+
+    def send_preview(self, request_path: str, head_only: bool = False) -> None:
+        parts = request_path.split("/", 3)
+        file_id = parts[2] if len(parts) >= 3 else ""
+        if not FILE_ID_RE.fullmatch(file_id):
+            self.send_preview_error(HTTPStatus.NOT_FOUND, "File not found")
+            return
+        stored = load_metadata(self.config, file_id)
+        if stored is None:
+            self.send_preview_error(HTTPStatus.NOT_FOUND, "File not found")
+            return
+        try:
+            source = (self.config.files_dir / file_id).open("rb")
+        except FileNotFoundError:
+            self.send_preview_error(HTTPStatus.NOT_FOUND, "File not found")
+            return
+        except OSError as exc:
+            self.log_error("Could not open preview %s: %s", file_id, exc)
+            self.send_preview_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not read file")
+            return
+
+        # Keep a single open descriptor so concurrent deletion remains safe.
+        with source:
+            try:
+                size = os.fstat(source.fileno()).st_size
+                preview_type, content_type = classify_preview(stored.filename, source.read(PREVIEW_SAMPLE_BYTES))
+                source.seek(0)
+                text_payload = None
+                truncated = False
+                if preview_type == "text":
+                    sample = source.read(MAX_TEXT_PREVIEW_BYTES + 1)
+                    truncated = len(sample) > MAX_TEXT_PREVIEW_BYTES
+                    text = codecs.getincrementaldecoder("utf-8")("replace").decode(
+                        sample[:MAX_TEXT_PREVIEW_BYTES], final=not truncated
+                    )
+                    text_payload = text.encode("utf-8")
+                    if len(text_payload) > MAX_TEXT_PREVIEW_BYTES:
+                        truncated = True
+                        text_payload = text_payload[:MAX_TEXT_PREVIEW_BYTES].decode("utf-8", errors="ignore").encode("utf-8")
+            except OSError as exc:
+                self.log_error("Could not read preview %s: %s", file_id, exc)
+                self.send_preview_error(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not read file")
+                return
+
+            if preview_type == "unsupported":
+                self.send_preview_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "This file type cannot be previewed; download the file instead")
+                return
+
+            start, end = 0, size - 1
+            status = HTTPStatus.OK
+            range_headers = self.headers.get_all("Range", [])
+            if text_payload is None and range_headers:
+                try:
+                    if len(range_headers) != 1:
+                        raise ValueError("Multiple ranges are not supported")
+                    start, end = parse_byte_range(range_headers[0], size)
+                except ValueError:
+                    self.send_preview_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "Invalid or unsatisfiable byte range", size)
+                    return
+                status = HTTPStatus.PARTIAL_CONTENT
+
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(text_payload) if text_payload is not None else end - start + 1))
+            self.send_header("Content-Disposition", "inline; filename*=UTF-8''%s" % quote(stored.filename, safe=""))
+            self.send_preview_security_headers()
+            if text_payload is not None:
+                self.send_header("X-Preview-Truncated", "true" if truncated else "false")
+            else:
+                self.send_header("Accept-Ranges", "bytes")
+                if status == HTTPStatus.PARTIAL_CONTENT:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.end_headers()
+            if head_only:
+                return
+            try:
+                if text_payload is not None:
+                    self.wfile.write(text_payload)
+                else:
+                    source.seek(start)
+                    remaining = end - start + 1
+                    while remaining:
+                        chunk = source.read(min(CHUNK_SIZE, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except OSError as exc:
+                self.log_error("Preview interrupted: %s", exc)
 
     def send_static(self, request_path: str) -> None:
         filename, content_type = STATIC_ROUTES[request_path]

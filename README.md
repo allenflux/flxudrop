@@ -95,8 +95,12 @@ curl -L -O "http://allenflux.tech:8090/f/FILE_ID/backup.tar.gz"
 
 Open `/` in your browser to see the file manager. By default, uploads, file listing, downloads, and deletion work without a token. The page loads existing files immediately, using the same startup commands as before.
 
-The page lists existing uploads with their filenames, sizes, and upload times, newest first. You can download files or delete them after confirming the filename. Deletion permanently removes the file and its metadata and invalidates its download link. Existing uploads appear automatically; no migration is needed. The directory is a flat list of FluxDrop uploads, not a browser for arbitrary server folders.
+The page lists existing uploads with their filenames, sizes, and upload times, newest first. You can preview files, copy their download links, download them, or delete them after confirming the filename. Deletion permanently removes the file and its metadata and invalidates its download link. Existing uploads appear automatically; no migration is needed. The directory is a flat list of FluxDrop uploads, not a browser for arbitrary server folders.
 
+- Drop local files onto the page or use **Choose files**. Multiple files upload one at a time with progress and individual download links; the directory refreshes automatically. Select files inside a folder rather than dropping the folder itself.
+- Write or paste content into **Write or paste text**, choose a filename, then click **Save and create link**. Text is stored as UTF-8; blank names use `note.txt`, and names without an extension get `.txt`. Saved files use the same storage, preview, download and deletion features as other uploads. Failed saves preserve the draft.
+- **Preview** opens text, images, PDFs and browser-supported audio/video in a dialog. Text previews show up to the first 256 KiB; download the file for its complete contents. HTML, SVG, Markdown and source code are displayed as plain text. Formats without a browser preview (such as Office documents and archives) retain their download action. Media support depends on the browser's codecs and PDF viewer.
+- **Copy link** works for both new and existing files. If automatic copying is unavailable, the page exposes a selectable link for manual copying.
 - Files are displayed 20 per page. Select individual files or the current page; selections carry across pages.
 - Download selected files as one ZIP (up to 100 files per download). The server streams the archive without loading files into memory or creating a temporary ZIP. Duplicate names receive a numeric suffix. ZIP files are packaged without compression.
 - Delete selected files after confirming the filenames. Failed files remain selected for retry. Deleted rows stay in place, turn gray and show a deletion status until you refresh the list.
@@ -118,7 +122,8 @@ The original optional `FLUXDROP_UPLOAD_TOKEN` setting remains available. Only wh
 
 Management APIs:
 
-- `GET /api/files` returns `{ "ok": true, "files": [...] }`, including each file's ID, filename, size, upload timestamp (`created_at`), and a relative `download_url`.
+- `GET /api/files` returns `{ "ok": true, "files": [...] }`, including each file's ID, filename, size, upload timestamp (`created_at`), relative `download_url`, `preview_type`, and relative `preview_url`. Upload responses also include the preview fields.
+- `GET /p/FILE_ID/FILENAME` and `HEAD /p/FILE_ID/FILENAME` serve an inline preview. Preview links, like download links, work without a token when the file ID is known. Text responses include `X-Preview-Truncated: true` when limited to 256 KiB; supported media accepts single byte ranges for seeking. Unsupported formats return HTTP 415, missing files return HTTP 404, and invalid or unsatisfiable media ranges return HTTP 416.
 - `DELETE /api/files/FILE_ID` deletes one file and returns `{ "ok": true, "file_id": "..." }`. Missing files return HTTP 404; storage failures return HTTP 500. A partially completed deletion can be retried.
 - `GET /api/files/download?file_id=ID1&file_id=ID2` streams a ZIP of the selected files. Like individual download links, known file IDs allow downloading without a token. Invalid selections return HTTP 400; missing files return HTTP 404 before a ZIP is sent.
 
@@ -172,7 +177,7 @@ sudo systemctl enable --now fluxdrop
 
 ## Notes
 
-- Download links are public if someone knows the URL.
+- Download and preview links are public if someone knows the URL.
 - Use `FLUXDROP_UPLOAD_TOKEN` if the service is exposed to the internet.
 - Both `curl -T` and `curl -F` stream uploads to disk with bounded memory use.
 - Multipart part headers are limited to 16 KiB. File parts use raw bytes; Base64 and quoted-printable transfer encodings are rejected.
@@ -188,5 +193,5 @@ python3 -m unittest discover -s tests -v
 Frontend logic tests (Node.js is only needed for these tests, not to run FluxDrop):
 
 ```bash
-node --test tests/file_actions.test.mjs
+node --test tests/*.test.mjs
 ```

@@ -19,10 +19,39 @@
     </div>
   </header>
   <main>
-    <section class="upload-help" aria-labelledby="upload-title">
-      <h2 id="upload-title" data-i18n="upload">上传文件</h2>
-      <pre><code id="upload-example">curl -T ./file.log http://allenflux.tech:8090/upload/file.log</code></pre>
-      <pre><code id="multipart-example">curl -F "file=@./file.log" http://allenflux.tech:8090/upload</code></pre>
+    <div class="create-grid">
+      <section class="create-panel" aria-labelledby="upload-title">
+        <h2 id="upload-title" data-i18n="upload">上传文件</h2>
+        <p class="field-help" data-i18n="uploadHint">从电脑选择文件，或直接拖入页面。支持同时上传多个文件。</p>
+        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-labelledby="drop-title" aria-describedby="drop-hint" aria-disabled="true">
+          <span class="drop-icon" aria-hidden="true">↑</span>
+          <strong id="drop-title" data-i18n="dropTitle">拖拽文件到这里</strong>
+          <span id="drop-hint" class="field-help" data-i18n="dropHint">松开即可上传并生成下载链接</span>
+        </div>
+        <input id="file-input" type="file" multiple hidden>
+        <button id="choose-files" class="button" type="button" data-i18n="chooseFiles" disabled>选择文件</button>
+        <details class="curl-help">
+          <summary data-i18n="curlUpload">使用命令行上传</summary>
+          <pre><code id="upload-example">curl -T ./file.log http://allenflux.tech:8090/upload/file.log</code></pre>
+          <pre><code id="multipart-example">curl -F "file=@./file.log" http://allenflux.tech:8090/upload</code></pre>
+        </details>
+      </section>
+      <section class="create-panel" aria-labelledby="text-title">
+        <h2 id="text-title" data-i18n="writeText">写入或粘贴文本</h2>
+        <p class="field-help" data-i18n="textHint">粘贴笔记、日志或代码，保存为文件后即可下载和分享。</p>
+        <form id="text-form">
+          <label for="text-filename" data-i18n="fileName">文件名</label>
+          <input id="text-filename" name="filename" value="note.txt" maxlength="180" autocomplete="off" spellcheck="false" data-i18n-placeholder="textFilenamePlaceholder" placeholder="例如 note.txt、config.json">
+          <label for="text-content" class="text-content-label" data-i18n="textContent">文本内容</label>
+          <textarea id="text-content" name="content" rows="7" spellcheck="false" data-i18n-placeholder="textPlaceholder" placeholder="在这里输入，或直接粘贴内容…"></textarea>
+          <div class="editor-actions"><span id="text-size" class="field-help"></span><button id="save-text" class="button primary" type="submit" data-i18n="saveText" disabled>保存并生成链接</button></div>
+        </form>
+      </section>
+    </div>
+    <section class="upload-feedback" aria-label="上传结果" id="upload-feedback">
+      <progress id="upload-progress" max="100" value="0" aria-label="上传进度" hidden></progress>
+      <p id="upload-status" class="field-help" role="status" aria-live="polite"></p>
+      <ul id="upload-results" class="upload-results" aria-live="polite"></ul>
     </section>
     <section aria-labelledby="page-title">
       <div class="panel-heading"><h2 id="page-title" data-i18n="directory">文件目录</h2><button id="refresh" class="button" disabled>刷新列表</button></div>
@@ -64,6 +93,19 @@
   </main>
   <footer lang="en">by Allen Flux</footer>
   <iframe id="download-frame" name="download-frame" title="文件下载" hidden></iframe>
+  <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title">
+    <div class="panel-heading"><h2 id="preview-title"></h2><button id="close-preview" class="button" type="button" data-i18n="close">关闭</button></div>
+    <p id="preview-meta" class="field-help"></p>
+    <p id="preview-status" class="notice" role="status" aria-live="polite" hidden></p>
+    <div id="preview-content" class="preview-content"></div>
+    <div class="dialog-actions"><a id="preview-download" class="button" data-i18n="download">下载</a></div>
+  </dialog>
+  <dialog id="link-dialog" aria-labelledby="link-title">
+    <h2 id="link-title" data-i18n="copyLink">复制下载链接</h2>
+    <p class="field-help" data-i18n="copyManual">自动复制不可用，请选中下面的链接复制。</p>
+    <input id="share-link" type="text" readonly aria-label="下载链接">
+    <div class="dialog-actions"><button id="close-link" class="button" type="button" data-i18n="close">关闭</button></div>
+  </dialog>
   <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description">
     <h2 id="delete-title">删除这个文件？</h2>
     <ul id="delete-filename" class="delete-filename"></ul>

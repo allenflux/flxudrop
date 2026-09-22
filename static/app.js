@@ -1,5 +1,7 @@
 import { PAGE_SIZE, MAX_DOWNLOAD_FILES, pageFiles, reconcileSelection, bulkDownloadUrl, deleteBatch } from "/static/file-actions.mjs";
 import { translate } from "/static/i18n.mjs";
+import { setupUploads, copyText } from "/static/browser-upload.mjs";
+import { setupPreview } from "/static/file-preview.mjs";
 
 const $ = (id) => document.getElementById(id);
 let language = navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
@@ -25,6 +27,15 @@ const fileStates = new Map();
 const visibleRows = new Map();
 const isRemoved = (id) => ["deleted", "missing"].includes(fileStates.get(id));
 const liveFiles = () => files.filter((file) => !isRemoved(file.file_id));
+const preview = setupPreview({ t, formatSize });
+const uploads = setupUploads({
+  t, formatSize,
+  getToken: () => token,
+  canUpload: () => loaded && !deleting && !(authRequired && !token),
+  onAuthRequired: () => { lock(); showNotice("invalidToken", {}, true); $("token").focus(); },
+  onUploaded: async () => { page = 1; await refreshFiles(); },
+  onBusyChange: () => { updateControls(); for (const file of files) updateRow(file); },
+});
 
 function showNotice(key = null, values = {}, error = false) {
   noticeState = key ? { key, values, error } : null;
@@ -65,17 +76,18 @@ function updateUploadExample() {
 }
 
 function updateControls() {
+  const busy = deleting || uploads.isBusy();
   const view = pageFiles(files, page);
   const selectable = view.items.filter((file) => !isRemoved(file.file_id));
   const checked = selectable.filter((file) => selectedIds.has(file.file_id)).length;
   $("select-all").checked = selectable.length > 0 && checked === selectable.length;
   $("select-all").indeterminate = checked > 0 && checked < selectable.length;
-  $("select-all").disabled = deleting || !selectable.length;
+  $("select-all").disabled = busy || !selectable.length;
   $("selection-count").textContent = t(selectedIds.size > MAX_DOWNLOAD_FILES ? "downloadLimit" : "selected", { count: selectedIds.size, limit: MAX_DOWNLOAD_FILES });
   const canDownload = selectedIds.size > 0 && selectedIds.size <= MAX_DOWNLOAD_FILES && !deleting;
   $("bulk-download").setAttribute("aria-disabled", String(!canDownload));
   $("bulk-download").href = canDownload ? bulkDownloadUrl([...selectedIds]) : "#";
-  $("bulk-delete").disabled = deleting || !selectedIds.size;
+  $("bulk-delete").disabled = busy || !selectedIds.size;
   $("selection-bar").hidden = !loaded;
   $("pagination").hidden = !loaded || view.pages <= 1;
   $("page-info").textContent = t("pageInfo", { page: view.page, pages: view.pages, size: PAGE_SIZE });
@@ -90,6 +102,7 @@ function updateControls() {
   const removed = files.length - live.length;
   $("removed-hint").hidden = removed === 0;
   $("removed-hint").textContent = t("removedHint", { count: removed });
+  uploads.render();
 }
 
 function updateRow(file) {
@@ -100,8 +113,10 @@ function updateRow(file) {
   controls.row.classList.toggle("is-deleting", state === "deleting");
   controls.row.classList.toggle("is-deleted", removed);
   controls.checkbox.checked = selectedIds.has(file.file_id);
-  controls.checkbox.disabled = removed || deleting;
-  controls.remove.disabled = removed || deleting;
+  controls.checkbox.disabled = removed || deleting || uploads.isBusy();
+  controls.remove.disabled = removed || deleting || uploads.isBusy();
+  controls.preview.disabled = removed || state === "deleting";
+  controls.copy.disabled = removed || state === "deleting";
   controls.download.setAttribute("aria-disabled", String(removed));
   controls.download.tabIndex = removed ? -1 : 0;
   controls.status.classList.toggle("file-status", Boolean(state));
@@ -110,6 +125,9 @@ function updateRow(file) {
 
 function lock() {
   revision++;
+  preview.close();
+  $("link-dialog").close();
+  $("share-link").value = "";
   authRequired = true;
   token = "";
   loaded = false;
@@ -119,6 +137,7 @@ function lock() {
   fileStates.clear();
   visibleRows.clear();
   pendingDeletion = [];
+  uploads.reset();
   $("token").value = "";
   $("file-list").replaceChildren();
   $("table-wrap").hidden = true;
@@ -174,6 +193,28 @@ function renderFiles() {
     const actionsCell = document.createElement("td");
     const actions = document.createElement("div");
     actions.className = "file-actions";
+    const previewButton = document.createElement("button");
+    previewButton.className = "button";
+    previewButton.textContent = t("preview");
+    previewButton.setAttribute("aria-label", t("previewFile", { name: file.filename }));
+    previewButton.addEventListener("click", () => preview.open(file));
+    const copy = document.createElement("button");
+    copy.className = "button";
+    copy.textContent = t("uploadCopy");
+    copy.setAttribute("aria-label", `${t("copyLink")} · ${file.filename}`);
+    copy.addEventListener("click", async () => {
+      const current = revision;
+      const url = new URL(file.download_url, location.origin).href;
+      const copied = await copyText(url);
+      if (current !== revision) return;
+      if (copied) showNotice("uploadCopied");
+      else {
+        $("share-link").value = url;
+        $("link-dialog").showModal();
+        $("share-link").focus();
+        $("share-link").select();
+      }
+    });
     const download = document.createElement("a");
     download.className = "button";
     download.href = file.download_url;
@@ -186,10 +227,10 @@ function renderFiles() {
     remove.textContent = t("remove");
     remove.setAttribute("aria-label", t("deleteFile", { name: file.filename }));
     remove.addEventListener("click", () => openDeleteDialog([file]));
-    actions.append(download, remove);
+    actions.append(previewButton, download, copy, remove);
     actionsCell.append(actions);
     row.append(nameCell, size, created, actionsCell);
-    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove });
+    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove, preview: previewButton, copy });
     updateRow(file);
     fragment.append(row);
   }
@@ -216,7 +257,7 @@ function renderDeleteDialog() {
 }
 
 function openDeleteDialog(targets) {
-  if (deleting) return;
+  if (deleting || uploads.isBusy()) return;
   pendingDeletion = targets.filter((file) => !isRemoved(file.file_id));
   if (!pendingDeletion.length) return;
   deleteReport = null;
@@ -265,9 +306,13 @@ function applyLanguage() {
   for (const element of document.querySelectorAll("[data-i18n-placeholder]")) element.placeholder = t(element.dataset.i18nPlaceholder);
   $("pagination").setAttribute("aria-label", t("pagination"));
   $("download-frame").title = t("downloadFrame");
+  $("upload-feedback").setAttribute("aria-label", t("uploadResults"));
+  $("upload-progress").setAttribute("aria-label", t("uploadProgressLabel"));
+  $("share-link").setAttribute("aria-label", t("downloadLink"));
   if (noticeState) showNotice(noticeState.key, noticeState.values, noticeState.error);
   renderFiles();
   renderDeleteDialog();
+  preview.render();
 }
 
 $("language").addEventListener("change", () => {
@@ -305,9 +350,10 @@ $("download-frame").addEventListener("load", () => {
   } catch { /* ZIP responses are handled by the browser's download manager. */ }
 });
 $("cancel-delete").addEventListener("click", () => $("delete-dialog").close());
+$("close-link").addEventListener("click", () => $("link-dialog").close());
 $("delete-dialog").addEventListener("cancel", (event) => { if (deleting) event.preventDefault(); });
 $("confirm-delete").addEventListener("click", async () => {
-  if (!pendingDeletion.length || deleting) return;
+  if (!pendingDeletion.length || deleting || uploads.isBusy()) return;
   const targets = [...pendingDeletion];
   const current = ++revision;
   deleting = true;
