@@ -55,13 +55,13 @@ th:last-child { width: 200px; }
 .file-size, time { color: #666; font-variant-numeric: tabular-nums; }
 .actions-heading { text-align: right; }
 .file-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 6px; }
-.row-actions { display: grid; grid-template-columns: repeat(4, 40px); gap: 4px; width: max-content; margin-left: auto; padding: 4px; border: 1px solid #e8ebef; border-radius: 10px; background: #f8f9fb; }
-.row-action { position: relative; width: 40px; height: 40px; min-height: 40px; padding: 10px; border-color: transparent; border-radius: 6px; color: #596579; background: transparent; }
+.row-actions { display: grid; grid-template-columns: repeat(4, 36px); gap: 6px; width: max-content; margin-left: auto; }
+.row-action { position: relative; width: 36px; height: 36px; min-height: 36px; padding: 8px; border-color: transparent; border-radius: 4px; color: #666; background: transparent; }
 .row-action svg { display: block; width: 18px; height: 18px; flex: none; }
-.row-action:hover:not(:disabled), .row-action:focus-visible { color: #1d4ed8; background: #e9effa; }
-.row-action-remove { color: #9b6470; }
-.row-action-remove:hover:not(:disabled), .row-action-remove:focus-visible { color: #b42336; background: #fcebed; }
-.action-tooltip { position: absolute; z-index: 2; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); padding: 5px 8px; border-radius: 5px; color: #fff; background: #273244; font-size: .75rem; line-height: 1.4; pointer-events: none; visibility: hidden; opacity: 0; }
+.row-action:hover:not(:disabled):not([aria-disabled="true"]), .row-action:focus-visible { color: #222; background: #f4f4f5; }
+.row-action-remove:hover:not(:disabled):not([aria-disabled="true"]), .row-action-remove:focus-visible { color: #a12626; background: #fbf2f2; }
+.row-action[aria-disabled="true"] { pointer-events: none; }
+.action-tooltip { position: absolute; z-index: 2; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%); padding: 5px 8px; border-radius: 4px; color: #fff; background: #333; font-size: .75rem; line-height: 1.4; pointer-events: none; visibility: hidden; opacity: 0; }
 .row-action:last-child .action-tooltip { right: 0; left: auto; transform: none; }
 .row-action:focus-visible .action-tooltip { visibility: visible; opacity: 1; }
 @media (hover: hover) { .row-action:hover:not(:disabled) .action-tooltip { visibility: visible; opacity: 1; } }
