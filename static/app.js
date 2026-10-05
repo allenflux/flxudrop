@@ -159,6 +159,26 @@ function lock() {
   updateControls();
 }
 
+const actionIcons = {
+  preview: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+  folder: '<path d="M3 8V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v2M3 8v11a1 1 0 0 0 1 1h15l3-10H6L3 20"/>',
+  download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/>',
+  copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3"/>',
+  remove: '<path d="M3 6h18M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M5 6l1 14a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1l1-14M10 10v7m4-7v7"/>',
+};
+
+function decorateRowAction(control, icon, label) {
+  control.className = `button row-action row-action-${icon}`;
+  control.title = label;
+  // Only the fixed icon markup enters HTML; filenames remain in text/attributes.
+  control.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${actionIcons[icon]}</svg>`;
+  const tooltip = document.createElement("span");
+  tooltip.className = "action-tooltip";
+  tooltip.setAttribute("aria-hidden", "true");
+  tooltip.textContent = label;
+  control.append(tooltip);
+}
+
 function renderFiles() {
   const view = pageFiles(files, page);
   page = view.page;
@@ -209,15 +229,15 @@ function renderFiles() {
     created.append(time);
     const actionsCell = document.createElement("td");
     const actions = document.createElement("div");
-    actions.className = "file-actions";
+    actions.className = "file-actions row-actions";
+    actions.setAttribute("role", "group");
+    actions.setAttribute("aria-label", t("actions"));
     const previewButton = document.createElement("button");
-    previewButton.className = "button";
-    previewButton.textContent = t(isDirectory ? "openDirectory" : "preview");
+    decorateRowAction(previewButton, isDirectory ? "folder" : "preview", t(isDirectory ? "openDirectory" : "preview"));
     previewButton.setAttribute("aria-label", t(isDirectory ? "openDirectoryNamed" : "previewFile", { name: file.filename }));
     previewButton.addEventListener("click", () => isDirectory ? directoryBrowser.open(file) : preview.open(file));
     const copy = document.createElement("button");
-    copy.className = "button";
-    copy.textContent = t("uploadCopy");
+    decorateRowAction(copy, "copy", t("uploadCopy"));
     copy.setAttribute("aria-label", `${t("copyLink")} · ${file.filename}`);
     copy.addEventListener("click", async () => {
       const current = revision;
@@ -233,15 +253,13 @@ function renderFiles() {
       }
     });
     const download = document.createElement("a");
-    download.className = "button";
+    decorateRowAction(download, "download", t(isDirectory ? "downloadZip" : "download"));
     download.href = file.download_url;
     download.download = file.download_filename || file.filename;
-    download.textContent = t(isDirectory ? "downloadZip" : "download");
-    download.setAttribute("aria-label", t("downloadFile", { name: file.filename }));
+    download.setAttribute("aria-label", isDirectory ? `${t("downloadDirectory")} · ${file.filename}` : t("downloadFile", { name: file.filename }));
     download.addEventListener("click", (event) => { if (isRemoved(file.file_id)) event.preventDefault(); });
     const remove = document.createElement("button");
-    remove.className = "button";
-    remove.textContent = t("remove");
+    decorateRowAction(remove, "remove", t("remove"));
     remove.setAttribute("aria-label", t("deleteFile", { name: file.filename }));
     remove.addEventListener("click", () => openDeleteDialog([file]));
     actions.append(previewButton, download, copy, remove);
