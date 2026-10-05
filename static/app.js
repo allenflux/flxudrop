@@ -336,7 +336,10 @@ async function refreshFiles(initial = false) {
 
 function applyLanguage() {
   document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
-  $("language").value = language;
+  $("language").setAttribute("aria-label", t("language"));
+  for (const button of $("language").querySelectorAll("[data-language]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.language === language));
+  }
   for (const element of document.querySelectorAll("[data-i18n]")) element.textContent = t(element.dataset.i18n);
   for (const element of document.querySelectorAll("[data-i18n-placeholder]")) element.placeholder = t(element.dataset.i18nPlaceholder);
   $("pagination").setAttribute("aria-label", t("pagination"));
@@ -353,11 +356,14 @@ function applyLanguage() {
   directoryBrowser.render();
 }
 
-$("language").addEventListener("change", () => {
-  language = $("language").value;
-  try { localStorage.setItem("fluxdrop-language", language); } catch { /* Optional preference. */ }
-  applyLanguage();
-});
+for (const button of $("language").querySelectorAll("[data-language]")) {
+  button.addEventListener("click", () => {
+    if (language === button.dataset.language) return;
+    language = button.dataset.language;
+    try { localStorage.setItem("fluxdrop-language", language); } catch { /* Optional preference. */ }
+    applyLanguage();
+  });
+}
 $("auth-form").addEventListener("submit", (event) => {
   event.preventDefault();
   token = $("token").value;

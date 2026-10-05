@@ -13,8 +13,10 @@
   <header class="page-heading">
     <h1>FluxDrop</h1>
     <div class="header-actions">
-      <label class="language-label" for="language"><span data-i18n="language">语言</span></label>
-      <select id="language"><option value="zh">中文</option><option value="en">English</option></select>
+      <div id="language" class="language-switch" role="group" aria-label="语言">
+        <button class="language-option" type="button" data-language="zh" lang="zh-CN" aria-pressed="true">中文</button>
+        <button class="language-option" type="button" data-language="en" lang="en" aria-pressed="false">English</button>
+      </div>
       <button id="logout" class="button" data-i18n="lock" hidden>锁定页面</button>
     </div>
   </header>

@@ -11,8 +11,11 @@ p { margin: 12px 0; }
 #summary { margin: 8px 0 20px; font-size: .875rem; }
 button, input, select, textarea { font: inherit; }
 .header-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-.language-label { margin: 0; color: #666; }
-select { max-width: 110px; min-height: 36px; padding: 5px 8px; border: 1px solid #ccc; border-radius: 4px; background: #fff; font-size: .875rem; }
+.language-switch { display: inline-grid; grid-template-columns: repeat(2, 64px); flex: none; gap: 2px; padding: 2px; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+.language-option { min-height: 34px; padding: 5px 8px; border: 0; border-radius: 2px; background: transparent; color: #666; font-size: .875rem; line-height: 1.4; font-weight: 500; }
+.language-option:hover { color: #222; background: #fafafa; }
+.language-option[aria-pressed="true"] { color: #222; background: #ededee; font-weight: 600; }
+#logout { min-width: 96px; }
 button, a { touch-action: manipulation; }
 button { cursor: pointer; }
 button:disabled, .button[aria-disabled="true"] { opacity: .5; cursor: default; }
@@ -128,6 +131,7 @@ textarea { display: block; width: 100%; min-height: 158px; resize: vertical; pad
 }
 @media (max-width: 760px) {
   body { margin: 28px auto; padding: 0 16px; }
+  .language-option { min-height: 44px; }
   thead { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   tbody tr { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 0; border-bottom: 1px solid #ddd; }
   td { padding: 0; border: 0; }
@@ -140,6 +144,10 @@ textarea { display: block; width: 100%; min-height: 158px; resize: vertical; pad
 @media (max-width: 380px) {
   .input-row { flex-direction: column; }
   .batch-actions { width: 100%; margin-left: 0; }
+}
+@media (max-width: 480px) {
+  .page-heading { flex-wrap: wrap; }
+  .header-actions { margin-left: auto; }
 }
 
 .upload-picker-actions { display: flex; flex-wrap: wrap; gap: 8px; }
