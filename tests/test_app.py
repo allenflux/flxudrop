@@ -10,7 +10,7 @@ from unittest import mock
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-from app import FluxDropConfig, infer_extension_from_sample, make_handler, sanitize_filename
+from app import FluxDropConfig, FluxDropHandler, infer_extension_from_sample, make_handler, sanitize_filename
 
 
 class FluxDropTests(unittest.TestCase):
@@ -261,6 +261,22 @@ class FluxDropTests(unittest.TestCase):
             self.assertEqual(response.status, 500)
             self.assertEqual(json.loads(response.read())["error"], "Could not store upload")
         self.assert_storage_empty()
+
+    def test_failed_file_upload_is_cleaned_before_error_response(self) -> None:
+        send_error = FluxDropHandler.send_error_json
+
+        def check_cleanup(handler, status, message):
+            self.assert_storage_empty()
+            return send_error(handler, status, message)
+
+        with mock.patch.object(FluxDropHandler, "send_error_json", autospec=True, side_effect=check_cleanup):
+            response = self.request(
+                "POST", "/upload",
+                b'--b\r\nContent-Disposition: form-data; name="file"\r\n\r\nunfinished',
+                {"Content-Type": "multipart/form-data; boundary=b"},
+            )
+            self.assertEqual(response.status, 400)
+            self.assertFalse(json.loads(response.read())["ok"])
 
     def test_filename_is_sanitized(self) -> None:
         self.assertEqual(sanitize_filename("../weird/name?.txt"), "name_.txt")

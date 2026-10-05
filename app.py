@@ -703,6 +703,7 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             return
 
         temp_path = self.config.storage_dir / f".upload-{secrets.token_hex(12)}.tmp"
+        error: tuple[HTTPStatus, str] | None = None
         try:
             content_type = self.headers.get("Content-Type")
             if multipart:
@@ -716,24 +717,23 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             guessed_filename = filename_or_inferred(filename, temp_path, content_type)
             stored = store_file(self.config, guessed_filename, temp_path, size)
         except OverflowError as exc:
-            self.send_error_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
-            return
+            error = (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
         except ValueError as exc:
-            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
-            return
+            error = (HTTPStatus.BAD_REQUEST, str(exc))
         except TimeoutError:
-            self.send_error_json(HTTPStatus.REQUEST_TIMEOUT, "Upload timed out")
-            return
+            error = (HTTPStatus.REQUEST_TIMEOUT, "Upload timed out")
         except ConnectionError as exc:
             self.log_error("Upload connection closed: %s", exc)
             return
         except OSError as exc:
             self.log_error("Could not store upload: %s", exc)
-            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not store upload")
-            return
+            error = (HTTPStatus.INTERNAL_SERVER_ERROR, "Could not store upload")
         finally:
             temp_path.unlink(missing_ok=True)
 
+        if error is not None:
+            self.send_error_json(*error)
+            return
         self.send_upload_response(stored)
 
     def parse_content_length(self, *, allow_chunked: bool = False) -> int | None:
