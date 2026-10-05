@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import errno
 import io
 import json
 import os
@@ -50,7 +51,13 @@ class DirectoryStreamTests(unittest.TestCase):
         for key, value in extra_headers:
             conn.putheader(key, value)
         conn.endheaders(body)
-        conn.sock.shutdown(socket.SHUT_WR)
+        try:
+            conn.sock.shutdown(socket.SHUT_WR)
+        except OSError as exc:
+            # Invalid framing may be rejected before this client half-closes.
+            # Keep reading the response; unrelated socket errors must still fail.
+            if exc.errno not in {errno.ENOTCONN, errno.ECONNRESET, errno.EPIPE}:
+                raise
         response = conn.getresponse()
         return response.status, response.read()
 
