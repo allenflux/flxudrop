@@ -652,6 +652,7 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         temp_path = self.config.storage_dir / f".upload-{secrets.token_hex(12)}.tmp"
         body_path = temp_path.with_suffix(".body.tmp")
         converted_path = temp_path.with_suffix(".zip.tmp")
+        error: tuple[HTTPStatus, str] | None = None
         try:
             with ExitStack() as stack:
                 source = self.rfile
@@ -676,25 +677,24 @@ class FluxDropHandler(BaseHTTPRequestHandler):
                 kind="directory", file_count=summary.file_count,
             )
         except OverflowError as exc:
-            self.send_error_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
-            return
+            error = (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
         except ValueError as exc:
-            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
-            return
+            error = (HTTPStatus.BAD_REQUEST, str(exc))
         except TimeoutError:
-            self.send_error_json(HTTPStatus.REQUEST_TIMEOUT, "Upload timed out")
-            return
+            error = (HTTPStatus.REQUEST_TIMEOUT, "Upload timed out")
         except ConnectionError as exc:
             self.log_error("Directory upload connection closed: %s", exc)
             return
         except OSError as exc:
             self.log_error("Could not store directory upload: %s", exc)
-            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not store directory upload")
-            return
+            error = (HTTPStatus.INTERNAL_SERVER_ERROR, "Could not store directory upload")
         finally:
             temp_path.unlink(missing_ok=True)
             body_path.unlink(missing_ok=True)
             converted_path.unlink(missing_ok=True)
+        if error is not None:
+            self.send_error_json(*error)
+            return
         self.send_upload_response(stored)
 
     def handle_upload(self, filename: str | None = None, *, multipart: bool = False) -> None:

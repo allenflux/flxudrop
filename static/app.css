@@ -64,6 +64,12 @@ th:last-child { width: 32%; }
 .upload-help { margin-bottom: 32px; }
 .directory-command-heading { margin-top: 24px; }
 .directory-command-heading h3 { margin: 0; font-size: 1rem; font-weight: 600; }
+.directory-command-steps { display: grid; gap: 16px; margin-top: 16px; }
+.directory-command-step { min-width: 0; padding: 16px; border: 1px solid #e5e5e5; border-radius: 6px; }
+.directory-command-step h4 { margin: 0; font-size: .9375rem; font-weight: 600; }
+.directory-command-step .field-help { margin: 8px 0; }
+.directory-command-step pre { margin: 12px 0 0; }
+.directory-command-step .panel-heading { flex-wrap: wrap; gap: 8px; }
 code, pre { background: #f4f4f5; border-radius: 6px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .875rem; }
 pre { padding: 16px; overflow: auto; }

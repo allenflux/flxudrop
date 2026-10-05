@@ -24,7 +24,7 @@ let pendingDeletion = [];
 let deleteProgress = { done: 0, total: 0 };
 let deleteReport = null;
 let noticeState = null;
-let directoryCommandNotice = null;
+const directoryCommandNotices = new Map();
 const fileStates = new Map();
 const visibleRows = new Map();
 const isRemoved = (id) => ["deleted", "missing"].includes(fileStates.get(id));
@@ -80,7 +80,7 @@ function updateUploadExample() {
   const auth = authRequired ? " -H 'Authorization: Bearer YOUR_TOKEN'" : "";
   $("upload-example").textContent = `curl${auth} -T ./file.log ${location.origin}/upload/file.log`;
   $("multipart-example").textContent = `curl${auth} -F "file=@./file.log" ${location.origin}/upload`;
-  $("directory-example").textContent = `target="./your-folder"\n(set -o pipefail; COPYFILE_DISABLE=1 tar -C "$(dirname "$target")" -czf - -- "$(basename "$target")" \\\n  | curl${auth} --fail -T - ${location.origin}/upload-directory)`;
+  $("directory-example").textContent = `(set -o pipefail;\n  COPYFILE_DISABLE=1 tar -C "$(dirname "$target")" \\\n    -czf - -- "$(basename "$target")" \\\n    | curl${auth} --fail -T - ${location.origin}/upload-directory)`;
 }
 
 function updateControls() {
@@ -327,7 +327,8 @@ function applyLanguage() {
   $("upload-progress").setAttribute("aria-label", t("uploadProgressLabel"));
   $("share-link").setAttribute("aria-label", t("downloadLink"));
   if (noticeState) showNotice(noticeState.key, noticeState.values, noticeState.error);
-  if (directoryCommandNotice) $("directory-command-status").textContent = t(directoryCommandNotice);
+  $("directory-command-manual").setAttribute("aria-label", t("allDirectoryCommands"));
+  for (const [id, key] of directoryCommandNotices) $(id).textContent = t(key);
   renderFiles();
   renderDeleteDialog();
   preview.render();
@@ -370,20 +371,31 @@ $("download-frame").addEventListener("load", () => {
 });
 $("cancel-delete").addEventListener("click", () => $("delete-dialog").close());
 $("close-link").addEventListener("click", () => $("link-dialog").close());
-$("copy-directory-command").addEventListener("click", async () => {
-  const command = $("directory-example");
-  const copied = await copyText(command.textContent);
-  directoryCommandNotice = copied ? "commandCopied" : "commandCopyManual";
-  $("directory-command-status").textContent = t(directoryCommandNotice);
-  $("directory-command-status").hidden = false;
+async function copyDirectoryCommand(commandIds, statusId) {
+  const commandText = commandIds.map((id) => $(id).textContent).join("\n");
+  const copied = await copyText(commandText);
+  const key = copied ? "commandCopied" : "commandCopyManual";
+  directoryCommandNotices.set(statusId, key);
+  $(statusId).textContent = t(key);
+  $(statusId).hidden = false;
+  const manual = $("directory-command-manual");
+  if (commandIds.length > 1) {
+    manual.hidden = copied;
+    manual.value = copied ? "" : commandText;
+    if (!copied) { manual.focus(); manual.select(); }
+    return;
+  }
   if (!copied) {
     const selection = window.getSelection();
     const range = document.createRange();
-    range.selectNodeContents(command);
+    range.selectNodeContents($(commandIds[0]));
     selection?.removeAllRanges();
     selection?.addRange(range);
   }
-});
+}
+$("copy-directory-command").addEventListener("click", () => copyDirectoryCommand(["directory-target-example", "directory-example"], "directory-command-status"));
+$("copy-directory-target").addEventListener("click", () => copyDirectoryCommand(["directory-target-example"], "directory-target-status"));
+$("copy-directory-upload").addEventListener("click", () => copyDirectoryCommand(["directory-example"], "directory-upload-status"));
 $("delete-dialog").addEventListener("cancel", (event) => { if (deleting) event.preventDefault(); });
 $("confirm-delete").addEventListener("click", async () => {
   if (!pendingDeletion.length || deleting || uploads.isBusy()) return;

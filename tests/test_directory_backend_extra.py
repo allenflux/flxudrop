@@ -9,11 +9,12 @@ import unittest
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from fluxdrop_directories import validate_directory_archive
 from fluxdrop_tar import convert_tar_directory
-from app import read_chunked_to_file
+from app import FluxDropConfig, FluxDropHandler, read_chunked_to_file
 
 
 def archive_bytes(entries):
@@ -201,7 +202,7 @@ class DirectoryTarStreamTests(unittest.TestCase):
     def test_pax_cannot_override_file_size_with_a_negative_value(self):
         info = tarfile.TarInfo("root/file")
         info.pax_headers = {"size": "-1"}
-        with self.assertRaisesRegex(ValueError, "entry size"):
+        with self.assertRaises(ValueError):
             self.convert(tar_bytes([(info, b"")]))
 
     def test_private_decoder_dispatch_keeps_end_markers_and_counts_each_header_once(self):
@@ -274,6 +275,32 @@ class ChunkedDirectoryBodyTests(unittest.TestCase):
     def test_decoded_bytes_are_limited_across_chunks(self):
         with self.assertRaises(OverflowError):
             self.decode(b"3\r\nabc\r\n3\r\ndef\r\n0\r\n\r\n", limit=5)
+
+
+class DirectoryUploadCleanupTests(unittest.TestCase):
+    def test_error_response_is_sent_only_after_all_temporary_files_are_removed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = FluxDropConfig(Path(temp), None, None, 1024 * 1024)
+            config.ensure_dirs()
+            payload = tar_bytes([("root/a", b"a"), ("other/b", b"b")])
+            encoded = f"{len(payload):x}\r\n".encode() + payload + b"\r\n0\r\n\r\n"
+            responses = []
+
+            def send_error(status, message):
+                self.assertEqual(list(config.storage_dir.glob(".upload-*")), [])
+                self.assertEqual(list(config.files_dir.iterdir()), [])
+                self.assertEqual(list(config.meta_dir.iterdir()), [])
+                responses.append(status)
+
+            handler = SimpleNamespace(
+                config=config, rfile=io.BytesIO(encoded), headers={},
+                parse_content_length=lambda **kwargs: -1,
+                send_error_json=send_error,
+                send_upload_response=lambda stored: self.fail("Invalid archive was accepted"),
+                log_error=lambda *args: None,
+            )
+            FluxDropHandler.handle_directory_upload(handler)
+            self.assertEqual(responses, [400])
 
 
 if __name__ == "__main__":

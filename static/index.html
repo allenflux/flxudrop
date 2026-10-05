@@ -23,12 +23,27 @@
       <h2 id="upload-title" data-i18n="curlUpload">使用命令行上传</h2>
       <pre><code id="upload-example">curl -T ./file.log http://allenflux.tech:8090/upload/file.log</code></pre>
       <pre><code id="multipart-example">curl -F "file=@./file.log" http://allenflux.tech:8090/upload</code></pre>
-      <div class="panel-heading directory-command-heading"><h3 data-i18n="curlDirectoryTitle">上传目录</h3><button id="copy-directory-command" class="button" type="button" data-i18n="copyCommand">复制命令</button></div>
-      <p class="field-help" data-i18n="curlDirectoryHint">适用于 Bash/Zsh，只需修改 target；使用系统自带的 tar 和 curl，保留目录层级，无需安装额外程序。原生 curl -F 只支持文件。</p>
-      <pre><code id="directory-example">target="./your-folder"
-(set -o pipefail; COPYFILE_DISABLE=1 tar -C "$(dirname "$target")" -czf - -- "$(basename "$target")" \
-  | curl --fail -T - http://allenflux.tech:8090/upload-directory)</code></pre>
+      <div class="panel-heading directory-command-heading"><h3 data-i18n="curlDirectoryTitle">上传目录</h3><button id="copy-directory-command" class="button" type="button" data-i18n="copyAllCommands">复制全部命令</button></div>
+      <p class="field-help" data-i18n="curlDirectoryHint">在同一个 Bash/Zsh 终端中，先执行第 1 步，再执行第 2 步。使用系统自带的 tar 和 curl，无需安装额外程序。</p>
+      <div class="directory-command-steps">
+        <section class="directory-command-step" aria-labelledby="directory-target-title">
+          <div class="panel-heading"><h4 id="directory-target-title" data-i18n="directoryTargetTitle">1. 设置目录路径</h4><button id="copy-directory-target" class="button" type="button" data-i18n="copyStepOne">复制第 1 步</button></div>
+          <p class="field-help" data-i18n="directoryTargetHint">把 ./your-folder 替换为要上传的目录路径，保留两侧引号。</p>
+          <pre><code id="directory-target-example">target="./your-folder"</code></pre>
+          <p id="directory-target-status" class="field-help" role="status" aria-live="polite" hidden></p>
+        </section>
+        <section class="directory-command-step" aria-labelledby="directory-upload-title">
+          <div class="panel-heading"><h4 id="directory-upload-title" data-i18n="directoryUploadTitle">2. 执行上传</h4><button id="copy-directory-upload" class="button" type="button" data-i18n="copyStepTwo">复制第 2 步</button></div>
+          <p class="field-help" data-i18n="directoryUploadHint">在刚才设置 target 的同一个终端执行，目录及其子目录会一起上传。</p>
+          <pre><code id="directory-example">(set -o pipefail;
+  COPYFILE_DISABLE=1 tar -C "$(dirname "$target")" \
+    -czf - -- "$(basename "$target")" \
+    | curl --fail -T - http://allenflux.tech:8090/upload-directory)</code></pre>
+          <p id="directory-upload-status" class="field-help" role="status" aria-live="polite" hidden></p>
+        </section>
+      </div>
       <p id="directory-command-status" class="field-help" role="status" aria-live="polite" hidden></p>
+      <textarea id="directory-command-manual" rows="6" readonly spellcheck="false" data-i18n-aria-label="allDirectoryCommands" aria-label="完整目录上传命令" hidden></textarea>
     </section>
     <div class="create-grid">
       <section class="create-panel" aria-labelledby="drag-upload-title">

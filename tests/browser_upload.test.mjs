@@ -371,3 +371,34 @@ test("copy uses the HTTP fallback and leaves failed copies selectable", async (c
   assert.equal(visible.selected, true);
   assert.equal(visible.value, "http://example.test/manual");
 });
+
+test("HTTP clipboard fallback preserves multiline commands, including continuation backslashes", async (context) => {
+  const { document } = environment(context);
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: {} });
+  context.after(() => {
+    if (previousNavigator) Object.defineProperty(globalThis, "navigator", previousNavigator);
+    else delete globalThis.navigator;
+  });
+  const createElement = document.createElement;
+  document.createElement = (tag) => {
+    const element = createElement(tag);
+    // Browser text inputs remove newlines; textareas retain them.
+    let value = "";
+    Object.defineProperty(element, "value", {
+      get: () => value,
+      set: (next) => { value = tag === "input" ? next.replace(/[\r\n]/g, "") : next; },
+    });
+    return element;
+  };
+  let copiedText;
+  document.execCommand = (command) => {
+    if (command !== "copy") return false;
+    copiedText = document.activeElement.value;
+    return true;
+  };
+  const command = 'target="./目录 with spaces"\n(set -o pipefail; tar -czf - -- "$target" \\\n  | curl --fail -T - http://example.test/upload-directory)';
+  assert.equal(await copyText(command), true);
+  assert.equal(copiedText, command);
+  assert.equal(document.body.children.length, 0);
+});

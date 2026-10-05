@@ -104,9 +104,8 @@ export async function copyText(text, input = null) {
   } catch { /* Clipboard API is unavailable on ordinary HTTP or permission was denied. */ }
   if (!globalThis.document) return false;
   const previousFocus = document.activeElement;
-  const field = input || document.createElement("input");
+  const field = input || document.createElement("textarea");
   if (!input) {
-    field.type = "text";
     field.readOnly = true;
     field.style.position = "fixed";
     field.style.opacity = "0";
