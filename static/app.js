@@ -2,6 +2,7 @@ import { PAGE_SIZE, MAX_DOWNLOAD_FILES, pageFiles, reconcileSelection, bulkDownl
 import { translate } from "/static/i18n.mjs";
 import { setupUploads, copyText } from "/static/browser-upload.mjs";
 import { setupPreview } from "/static/file-preview.mjs";
+import { setupDirectoryBrowser } from "/static/directory-browser.mjs";
 
 const $ = (id) => document.getElementById(id);
 let language = navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
@@ -23,11 +24,17 @@ let pendingDeletion = [];
 let deleteProgress = { done: 0, total: 0 };
 let deleteReport = null;
 let noticeState = null;
+let directoryCommandNotice = null;
 const fileStates = new Map();
 const visibleRows = new Map();
 const isRemoved = (id) => ["deleted", "missing"].includes(fileStates.get(id));
 const liveFiles = () => files.filter((file) => !isRemoved(file.file_id));
 const preview = setupPreview({ t, formatSize });
+const directoryBrowser = setupDirectoryBrowser({
+  t, formatSize, api,
+  onPreview: (file) => preview.open(file),
+  onAuthRequired: () => { lock(); showNotice("invalidToken", {}, true); $("token").focus(); },
+});
 const uploads = setupUploads({
   t, formatSize,
   getToken: () => token,
@@ -73,6 +80,7 @@ function updateUploadExample() {
   const auth = authRequired ? " -H 'Authorization: Bearer YOUR_TOKEN'" : "";
   $("upload-example").textContent = `curl${auth} -T ./file.log ${location.origin}/upload/file.log`;
   $("multipart-example").textContent = `curl${auth} -F "file=@./file.log" ${location.origin}/upload`;
+  $("directory-example").textContent = `target="./your-folder"\n(set -o pipefail; COPYFILE_DISABLE=1 tar -C "$(dirname "$target")" -czf - -- "$(basename "$target")" \\\n  | curl${auth} --fail -T - ${location.origin}/upload-directory)`;
 }
 
 function updateControls() {
@@ -126,6 +134,7 @@ function updateRow(file) {
 function lock() {
   revision++;
   preview.close();
+  directoryBrowser.close();
   $("link-dialog").close();
   $("share-link").value = "";
   authRequired = true;
@@ -157,6 +166,7 @@ function renderFiles() {
   visibleRows.clear();
   const dateFormat = new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" });
   for (const file of view.items) {
+    const isDirectory = file.kind === "directory";
     const row = document.createElement("tr");
     const nameCell = document.createElement("td");
     const name = document.createElement("div");
@@ -178,12 +188,19 @@ function renderFiles() {
     id.textContent = file.file_id;
     id.title = file.file_id;
     id.setAttribute("role", "status");
-    info.append(title, id);
+    info.append(title);
+    if (isDirectory) {
+      const badge = document.createElement("span");
+      badge.className = "folder-badge";
+      badge.textContent = t("folderCount", { count: file.file_count ?? 0 });
+      info.append(badge);
+    }
+    info.append(id);
     name.append(checkbox, info);
     nameCell.append(name);
     const size = document.createElement("td");
     size.className = "file-size";
-    size.textContent = formatSize(file.size);
+    size.textContent = isDirectory ? t("folderZipSize", { size: formatSize(file.size) }) : formatSize(file.size);
     const created = document.createElement("td");
     const time = document.createElement("time");
     const date = new Date(file.created_at * 1000);
@@ -195,9 +212,9 @@ function renderFiles() {
     actions.className = "file-actions";
     const previewButton = document.createElement("button");
     previewButton.className = "button";
-    previewButton.textContent = t("preview");
-    previewButton.setAttribute("aria-label", t("previewFile", { name: file.filename }));
-    previewButton.addEventListener("click", () => preview.open(file));
+    previewButton.textContent = t(isDirectory ? "openDirectory" : "preview");
+    previewButton.setAttribute("aria-label", t(isDirectory ? "openDirectoryNamed" : "previewFile", { name: file.filename }));
+    previewButton.addEventListener("click", () => isDirectory ? directoryBrowser.open(file) : preview.open(file));
     const copy = document.createElement("button");
     copy.className = "button";
     copy.textContent = t("uploadCopy");
@@ -218,8 +235,8 @@ function renderFiles() {
     const download = document.createElement("a");
     download.className = "button";
     download.href = file.download_url;
-    download.download = file.filename;
-    download.textContent = t("download");
+    download.download = file.download_filename || file.filename;
+    download.textContent = t(isDirectory ? "downloadZip" : "download");
     download.setAttribute("aria-label", t("downloadFile", { name: file.filename }));
     download.addEventListener("click", (event) => { if (isRemoved(file.file_id)) event.preventDefault(); });
     const remove = document.createElement("button");
@@ -310,9 +327,11 @@ function applyLanguage() {
   $("upload-progress").setAttribute("aria-label", t("uploadProgressLabel"));
   $("share-link").setAttribute("aria-label", t("downloadLink"));
   if (noticeState) showNotice(noticeState.key, noticeState.values, noticeState.error);
+  if (directoryCommandNotice) $("directory-command-status").textContent = t(directoryCommandNotice);
   renderFiles();
   renderDeleteDialog();
   preview.render();
+  directoryBrowser.render();
 }
 
 $("language").addEventListener("change", () => {
@@ -351,6 +370,20 @@ $("download-frame").addEventListener("load", () => {
 });
 $("cancel-delete").addEventListener("click", () => $("delete-dialog").close());
 $("close-link").addEventListener("click", () => $("link-dialog").close());
+$("copy-directory-command").addEventListener("click", async () => {
+  const command = $("directory-example");
+  const copied = await copyText(command.textContent);
+  directoryCommandNotice = copied ? "commandCopied" : "commandCopyManual";
+  $("directory-command-status").textContent = t(directoryCommandNotice);
+  $("directory-command-status").hidden = false;
+  if (!copied) {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(command);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+});
 $("delete-dialog").addEventListener("cancel", (event) => { if (deleting) event.preventDefault(); });
 $("confirm-delete").addEventListener("click", async () => {
   if (!pendingDeletion.length || deleting || uploads.isBusy()) return;

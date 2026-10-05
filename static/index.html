@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="查看、下载和管理 FluxDrop 中已上传的文件。">
+  <meta name="description" content="上传、浏览和下载 FluxDrop 中的文件与文件夹。">
   <title>FluxDrop</title>
   <link rel="icon" href="/static/favicon.svg?v=fd-blue" type="image/svg+xml">
   <link rel="stylesheet" href="/static/app.css">
@@ -23,18 +23,29 @@
       <h2 id="upload-title" data-i18n="curlUpload">使用命令行上传</h2>
       <pre><code id="upload-example">curl -T ./file.log http://allenflux.tech:8090/upload/file.log</code></pre>
       <pre><code id="multipart-example">curl -F "file=@./file.log" http://allenflux.tech:8090/upload</code></pre>
+      <div class="panel-heading directory-command-heading"><h3 data-i18n="curlDirectoryTitle">上传目录</h3><button id="copy-directory-command" class="button" type="button" data-i18n="copyCommand">复制命令</button></div>
+      <p class="field-help" data-i18n="curlDirectoryHint">适用于 Bash/Zsh，只需修改 target；使用系统自带的 tar 和 curl，保留目录层级，无需安装额外程序。原生 curl -F 只支持文件。</p>
+      <pre><code id="directory-example">target="./your-folder"
+(set -o pipefail; COPYFILE_DISABLE=1 tar -C "$(dirname "$target")" -czf - -- "$(basename "$target")" \
+  | curl --fail -T - http://allenflux.tech:8090/upload-directory)</code></pre>
+      <p id="directory-command-status" class="field-help" role="status" aria-live="polite" hidden></p>
     </section>
     <div class="create-grid">
       <section class="create-panel" aria-labelledby="drag-upload-title">
         <h2 id="drag-upload-title" data-i18n="dragUpload">拖拽上传</h2>
-        <p class="field-help" data-i18n="uploadHint">从电脑选择文件，或直接拖入页面。支持同时上传多个文件。</p>
+        <p class="field-help" data-i18n="uploadHint">选择文件或文件夹，也可一起拖入页面。文件夹会保留子目录结构。</p>
         <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-labelledby="drop-title" aria-describedby="drop-hint" aria-disabled="true">
           <span class="drop-icon" aria-hidden="true">↑</span>
-          <strong id="drop-title" data-i18n="dropTitle">拖拽文件到这里</strong>
+          <strong id="drop-title" data-i18n="dropTitle">拖拽文件或文件夹到这里</strong>
           <span id="drop-hint" class="field-help" data-i18n="dropHint">松开即可上传并生成下载链接</span>
         </div>
         <input id="file-input" type="file" multiple hidden>
-        <button id="choose-files" class="button" type="button" data-i18n="chooseFiles" disabled>选择文件</button>
+        <input id="directory-input" type="file" webkitdirectory multiple hidden>
+        <div class="upload-picker-actions">
+          <button id="choose-files" class="button" type="button" data-i18n="chooseFiles" disabled>选择文件</button>
+          <button id="choose-directory" class="button" type="button" data-i18n="chooseDirectory" disabled>选择文件夹</button>
+        </div>
+        <p class="field-help directory-picker-hint" data-i18n="directoryPickerHint">选择文件夹时无法包含空目录；需要保留空目录时，请拖拽文件夹或使用上方的目录上传命令。每个文件夹最多 10,000 个条目。</p>
       </section>
       <section class="create-panel" aria-labelledby="text-title">
         <h2 id="text-title" data-i18n="writeText">写入或粘贴文本</h2>
@@ -93,6 +104,15 @@
   </main>
   <footer lang="en">by Allen Flux</footer>
   <iframe id="download-frame" name="download-frame" title="文件下载" hidden></iframe>
+  <dialog id="directory-dialog" class="directory-dialog" aria-labelledby="directory-title">
+    <div class="panel-heading"><h2 id="directory-title"></h2><button id="close-directory" class="button" type="button" data-i18n="closeDirectory">关闭文件夹</button></div>
+    <p id="directory-meta" class="field-help"></p>
+    <nav id="directory-breadcrumbs" class="directory-breadcrumbs" aria-label="文件夹路径"></nav>
+    <div class="directory-toolbar"><button id="directory-back" class="button" type="button" data-i18n="parentDirectory">上一级</button><button id="directory-retry" class="button" type="button" data-i18n="refresh">刷新列表</button></div>
+    <p id="directory-status" class="notice" role="status" aria-live="polite" hidden></p>
+    <ul id="directory-entries" class="directory-entries"></ul>
+    <div class="dialog-actions"><a id="directory-download" class="button" data-i18n="downloadDirectory">下载整个文件夹（ZIP）</a></div>
+  </dialog>
   <dialog id="preview-dialog" class="preview-dialog" aria-labelledby="preview-title">
     <div class="panel-heading"><h2 id="preview-title"></h2><button id="close-preview" class="button" type="button" data-i18n="close">关闭</button></div>
     <p id="preview-meta" class="field-help"></p>

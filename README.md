@@ -91,13 +91,34 @@ The response looks like:
 curl -L -O "http://allenflux.tech:8090/f/FILE_ID/backup.tar.gz"
 ```
 
+## Upload a Folder
+
+Choose **Choose folder** in the web UI to upload any folder with its nested files. Folder names are arbitrary; no name is reserved or hardcoded. Existing single-file curl commands are unchanged, and no curl client modifications or wrappers are required.
+
+For command-line directory uploads, use the server's existing `tar` and `curl`. Change only `target` and stream the folder straight to FluxDrop; no extra program, client wrapper, or local temporary archive is needed:
+
+```bash
+target="./your-folder"
+(set -o pipefail; COPYFILE_DISABLE=1 tar -C "$(dirname "$target")" -czf - -- "$(basename "$target")" | curl --fail -T - http://allenflux.tech:8090/upload-directory)
+```
+
+Run this in Bash or Zsh. The quoted path supports spaces and Unicode names. The subshell reports a failure if tar or curl fails without changing your shell settings. COPYFILE_DISABLE disables macOS metadata sidecars; it has no effect on Linux tar. Nested files, hidden files and empty directories are preserved. The same copyable command appears on the web page and uses that page's server address. If authentication is enabled, add your usual `-H 'Authorization: Bearer TOKEN'` to curl.
+
+`/upload-directory` also accepts an existing ZIP, tar, or tar.gz containing one root folder with `curl --fail -T ./your-folder.zip URL/upload-directory`. Uploading an archive to the existing `/upload` endpoint without a directory header still stores it as an ordinary file.
+
+`curl -F "file=@./your-folder"` cannot read a directory as a file and may fail locally with curl error 43. A server change cannot make that exact command recursively upload a folder. Curl's `@` form syntax attaches a file; see the [curl manual](https://curl.se/docs/manpage.html#-F).
+
+Folders appear alongside files in the web UI. Open a folder to browse its children and subfolders, preview supported files, or download an individual file. The main folder download is a ZIP containing the original root folder and its contents. Deleting a folder removes the whole upload and invalidates its child links. Batch downloads contain each selected folder as a named ZIP inside the batch archive.
+
+Folder uploads are atomic and stored as ZIP archives without extracting their paths onto the server. Streamed tar/tar.gz uploads are converted to ZIP on the server. ZIP stored/deflate compression and ZIP64 are supported. Each upload accepts up to 10,000 entries, including implicit directories, and up to 64 MiB of ZIP directory metadata. Both the request body and total expanded file content must fit `FLUXDROP_MAX_UPLOAD_MB`. Unsafe paths, duplicate entries, conflicting file/folder paths, symbolic links, special files and corrupt archives are rejected. Temporary archive construction requires available server disk space; uploading from a stable directory is recommended.
+
 ## File Management UI
 
 Open `/` in your browser to see the file manager. By default, uploads, file listing, downloads, and deletion work without a token. The page loads existing files immediately, using the same startup commands as before.
 
-The page lists existing uploads with their filenames, sizes, and upload times, newest first. You can preview files, copy their download links, download them, or delete them after confirming the filename. Deletion permanently removes the file and its metadata and invalidates its download link. Existing uploads appear automatically; no migration is needed. The directory is a flat list of FluxDrop uploads, not a browser for arbitrary server folders.
+The page lists existing file and folder uploads with their names, sizes, and upload times, newest first. You can open folders, preview files, copy their download links, download them, or delete them after confirming the name. Deletion permanently removes the upload and its metadata and invalidates its links. Existing uploads appear automatically; no migration is needed. Folder sizes in the main list are stored ZIP sizes; child file sizes are their uncompressed sizes. Browsing is limited to uploaded folders.
 
-- Drop local files onto the page or use **Choose files**. Multiple files upload one at a time with progress and individual download links; the directory refreshes automatically. Select files inside a folder rather than dropping the folder itself.
+- Drop local files or folders onto the page, or use **Choose files** / **Choose folder**. Each top-level folder uploads as one item with its hierarchy preserved. Multiple uploads run one at a time with progress and individual download links; the list refreshes automatically. Folder selection uses the browser's directory picker, which cannot include empty directories; drag and drop in browsers supporting directory entries, or the command-line directory upload, preserves empty directories.
 - Write or paste content into **Write or paste text**, choose a filename, then click **Save and create link**. Text is stored as UTF-8; blank names use `note.txt`, and names without an extension get `.txt`. Saved files use the same storage, preview, download and deletion features as other uploads. Failed saves preserve the draft.
 - **Preview** opens text, images, PDFs and browser-supported audio/video in a dialog. Text previews show up to the first 256 KiB; download the file for its complete contents. HTML, SVG, Markdown and source code are displayed as plain text. Formats without a browser preview (such as Office documents and archives) retain their download action. Media support depends on the browser's codecs and PDF viewer.
 - **Copy link** works for both new and existing files. If automatic copying is unavailable, the page exposes a selectable link for manual copying.
@@ -126,6 +147,10 @@ Management APIs:
 - `GET /p/FILE_ID/FILENAME` and `HEAD /p/FILE_ID/FILENAME` serve an inline preview. Preview links, like download links, work without a token when the file ID is known. Text responses include `X-Preview-Truncated: true` when limited to 256 KiB; supported media accepts single byte ranges for seeking. Unsupported formats return HTTP 415, missing files return HTTP 404, and invalid or unsatisfiable media ranges return HTTP 416.
 - `DELETE /api/files/FILE_ID` deletes one file and returns `{ "ok": true, "file_id": "..." }`. Missing files return HTTP 404; storage failures return HTTP 500. A partially completed deletion can be retried.
 - `GET /api/files/download?file_id=ID1&file_id=ID2` streams a ZIP of the selected files. Like individual download links, known file IDs allow downloading without a token. Invalid selections return HTTP 400; missing files return HTTP 404 before a ZIP is sent.
+- `POST /upload` with `X-FluxDrop-Directory: files` accepts multipart file parts with root-relative filenames such as `your-folder/sub/data.json`; empty-directory parts have a trailing `/` and an empty body. This is the web folder uploader's request. `POST /upload-directory` is an alias.
+- `PUT /upload-directory` accepts ZIP, tar, or tar.gz containing one root directory, including chunked streams from `curl -T -`. The existing `/upload` also accepts directory ZIPs when explicitly marked with `X-FluxDrop-Directory: zip` (raw PUT or a ZIP file in multipart POST). All directory uploads use the same optional upload token and size limits as regular uploads. Unmarked `/upload` requests keep their original file behavior.
+- Folder list/upload results include `kind: "directory"`, `filename` (the root folder name), `download_filename` (the ZIP name), `file_count`, and `browse_url`. Existing file records remain compatible.
+- `GET /api/directories/FILE_ID?path=subfolder` returns immediate `entries` with names, relative paths, kinds, sizes, and child file preview/download links. Omit `path` to browse the root. Listing requires the optional management token. Known child preview/download URLs, like other download links, work without a token. Child files support the same preview types and media byte ranges as ordinary files. Deletion operates on the entire uploaded folder.
 
 ## Configuration
 
@@ -181,7 +206,7 @@ sudo systemctl enable --now fluxdrop
 - Use `FLUXDROP_UPLOAD_TOKEN` if the service is exposed to the internet.
 - Both `curl -T` and `curl -F` stream uploads to disk with bounded memory use.
 - Multipart part headers are limited to 16 KiB. File parts use raw bytes; Base64 and quoted-printable transfer encodings are rejected.
-- Uploads require `Content-Length`; chunked transfer encoding is not supported. Curl supplies the length when uploading a regular file with either command above.
+- Regular file uploads require `Content-Length`; curl supplies it when uploading a regular file. Directory uploads also accept chunked transfer encoding for the `tar | curl -T -` pipeline, enforcing the upload limit as bytes arrive. Conflicting length headers, malformed chunks and truncated streams are rejected.
 - Incomplete or malformed uploads are rejected and temporary files are removed. Storage failures are logged on the server and return HTTP 500.
 
 ## Tests

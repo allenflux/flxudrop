@@ -5,8 +5,9 @@ from __future__ import annotations
 import email.parser
 import email.policy
 import re
+import tempfile
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 
 CHUNK_SIZE = 64 * 1024
@@ -120,20 +121,7 @@ class _MultipartReader:
             self.buffer.clear()
 
 
-def read_multipart_to_file(
-    source: BinaryIO,
-    target_path: Path,
-    content_length: int,
-    content_type: str,
-) -> tuple[str | None, str | None, int]:
-    """Save the first file part and return its filename, content type and size.
-
-    A part qualifies when it has a nonempty filename or its field name is
-    ``file``. Other parts, the preamble and the epilogue are streamed away.
-    Malformed/truncated bodies raise ValueError; callers must remove the target
-    on failure and enforce their request-size limit before calling this helper.
-    Only unencoded form-data payloads (binary, 8bit or 7bit) are accepted.
-    """
+def _start_multipart(source: BinaryIO, content_length: int, content_type: str):
     if content_length < 0:
         raise ValueError("Invalid Content-Length")
     if "\r" in content_type or "\n" in content_type:
@@ -150,7 +138,24 @@ def read_multipart_to_file(
     if not _BOUNDARY_RE.fullmatch(boundary) or boundary.endswith(b" "):
         raise ValueError("Multipart boundary is invalid")
 
-    reader = _MultipartReader(source, content_length, boundary)
+    return _MultipartReader(source, content_length, boundary), parser
+
+
+def read_multipart_to_file(
+    source: BinaryIO,
+    target_path: Path,
+    content_length: int,
+    content_type: str,
+) -> tuple[str | None, str | None, int]:
+    """Save the first file part and return its filename, content type and size.
+
+    A part qualifies when it has a nonempty filename or its field name is
+    ``file``. Other parts, the preamble and the epilogue are streamed away.
+    Malformed/truncated bodies raise ValueError; callers must remove the target
+    on failure and enforce their request-size limit before calling this helper.
+    Only unencoded form-data payloads (binary, 8bit or 7bit) are accepted.
+    """
+    reader, parser = _start_multipart(source, content_length, content_type)
     closing, _ = reader.read_to_boundary()
     selected: tuple[str | None, str | None, int] | None = None
     with target_path.open("wb") as target:
@@ -173,3 +178,49 @@ def read_multipart_to_file(
     if selected is None:
         raise ValueError("Multipart field 'file' was not found")
     return selected
+
+
+def read_multipart_files(
+    source: BinaryIO,
+    content_length: int,
+    content_type: str,
+    consume: Callable[[str, BinaryIO, int], None],
+    *,
+    temp_dir: Path,
+    max_parts: int,
+) -> None:
+    """Stream named file parts through a temporary file into ``consume``.
+
+    A seekable temporary file lets the delimiter scanner rewind tentative
+    boundaries without holding either the request or an individual file in RAM.
+    ``consume`` is called with a rewound stream valid only during the callback.
+    """
+    reader, parser = _start_multipart(source, content_length, content_type)
+    closing, _ = reader.read_to_boundary()
+    selected = 0
+    parts = 0
+    while not closing:
+        parts += 1
+        if parts > max_parts:
+            raise ValueError("Directory contains too many multipart entries")
+        headers = parser.parsebytes(reader.read_headers())
+        if headers.defects:
+            raise ValueError("Multipart part headers are malformed")
+        filename = headers.get_filename()
+        is_file = filename or headers.get_param("name", header="content-disposition") == "file"
+        if is_file:
+            if not filename:
+                raise ValueError("Directory entries require relative filenames including a root folder")
+            encoding = str(headers.get("Content-Transfer-Encoding", "binary")).strip().lower()
+            if encoding not in {"binary", "8bit", "7bit"}:
+                raise ValueError("Encoded multipart file parts are not supported")
+            with tempfile.TemporaryFile(dir=temp_dir) as target:
+                closing, size = reader.read_to_boundary(target)
+                target.seek(0)
+                consume(filename, target, size)
+            selected += 1
+        else:
+            closing, _ = reader.read_to_boundary()
+    reader.finish()
+    if not selected:
+        raise ValueError("Multipart field 'file' was not found")

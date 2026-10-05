@@ -8,7 +8,7 @@ ENV FLUXDROP_PUBLIC_URL=http://allenflux.tech:8090
 
 WORKDIR /app
 
-COPY app.py fluxdrop_multipart.py /app/
+COPY app.py fluxdrop_multipart.py fluxdrop_directories.py fluxdrop_tar.py /app/
 COPY static /app/static
 
 EXPOSE 8090

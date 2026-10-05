@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { copyText, droppedFiles, hasFileTransfer, sendUpload, setupUploads, textUpload } from "../static/browser-upload.mjs";
+import { MAX_DIRECTORY_ENTRIES, copyText, droppedFiles, hasFileTransfer, selectedDirectories, sendUpload, setupUploads, textUpload } from "../static/browser-upload.mjs";
 
 class Element {
   constructor(tag = "div", document = null) {
@@ -112,21 +112,116 @@ test("text uploads preserve exact UTF-8 content and select a usable filename", a
   assert.equal(textUpload("x", "script.py").name, "script.py");
 });
 
-test("directory drops exclude folder placeholders but retain empty real files", async () => {
-  const realFile = file("empty.txt");
-  const transfer = {
-    types: ["Files"],
-    items: [
-      { kind: "file", getAsFile: () => file("folder"), webkitGetAsEntry: () => ({ isDirectory: true }) },
-      { kind: "file", getAsFile: () => realFile, webkitGetAsEntry: () => ({ isFile: true }) },
-      { kind: "string", getAsFile: () => null },
-    ],
-  };
-  assert.deepEqual(await droppedFiles(transfer), { files: [realFile], hasDirectories: true });
+function fileEntry(name, text = "") {
+  return { name, isFile: true, file: (resolve) => resolve(file(name, text)) };
+}
+
+function directoryEntry(name, batches) {
+  return { name, isDirectory: true, createReader: () => {
+    let index = 0;
+    return { readEntries: (resolve) => resolve(batches[index++] || []) };
+  } };
+}
+
+function transferItems(...entries) {
+  return { types: ["Files"], items: entries.map((entry) => ({
+    kind: "file", getAsFile: () => entry.isFile ? file(entry.name) : null, webkitGetAsEntry: () => entry,
+  })) };
+}
+
+test("directory drops drain batches, preserve nested paths and empty directories, and retain loose files", async () => {
+  const directory = directoryEntry("results", [
+    [fileEntry("first.txt", "one"), directoryEntry("empty", [])],
+    [directoryEntry("nested", [[fileEntry("first.txt", "two")]])],
+  ]);
+  const transfer = transferItems(directory, fileEntry("loose.txt"));
+  const result = await droppedFiles(transfer);
+  assert.equal(result.files[0].name, "loose.txt");
+  assert.equal(result.directories.length, 1);
+  const folder = result.directories[0];
+  assert.equal(folder.name, "results");
+  assert.deepEqual(folder.entries.map((entry) => entry.path), ["results/", "results/first.txt", "results/empty/", "results/nested/", "results/nested/first.txt"]);
+  assert.equal(await folder.entries[4].blob.text(), "two");
   assert.equal(hasFileTransfer(transfer), true);
   assert.equal(hasFileTransfer({ types: ["text/plain"], items: [{ kind: "string" }] }), false);
-  assert.deepEqual(await droppedFiles({ files: [realFile] }), { files: [realFile], hasDirectories: false });
-  assert.deepEqual(await droppedFiles({ items: [{ kind: "file", getAsFile: () => file("folder"), getAsFileSystemHandle: async () => ({ kind: "directory" }) }] }), { files: [], hasDirectories: true });
+  const realFile = file("empty.txt");
+  assert.deepEqual(await droppedFiles({ files: [realFile] }), { files: [realFile], directories: [] });
+});
+
+test("File System Access directory drops preserve empty directories and capture all handles before awaiting", async () => {
+  const captured = [];
+  const handle = { kind: "directory", name: "empty", async *values() {} };
+  const transfer = { items: [1, 2].map((id) => ({
+    kind: "file", getAsFile: () => null,
+    getAsFileSystemHandle: () => { captured.push(id); return Promise.resolve({ ...handle, name: `folder${id}` }); },
+  })) };
+  const pending = droppedFiles(transfer);
+  assert.deepEqual(captured, [1, 2]);
+  const result = await pending;
+  assert.deepEqual(result.directories.map((directory) => directory.entries[0].path), ["folder1/", "folder2/"]);
+});
+
+test("folder picker groups roots without flattening duplicate names, and rejects invalid paths and entry overflow", () => {
+  const files = ["results/a/same.txt", "results/b/same.txt", "other/file.txt"].map((path) => Object.assign(file("same.txt"), { webkitRelativePath: path }));
+  const directories = selectedDirectories(files);
+  assert.deepEqual(directories.map((directory) => [directory.name, directory.entries.map((entry) => entry.path)]), [
+    ["results", ["results/a/same.txt", "results/b/same.txt"]], ["other", ["other/file.txt"]],
+  ]);
+  assert.throws(() => selectedDirectories([Object.assign(file("bad"), { webkitRelativePath: "results/../bad" })]), { key: "uploadDirectoryReadError" });
+  assert.throws(() => selectedDirectories(Array(MAX_DIRECTORY_ENTRIES + 1).fill(files[0])), { key: "uploadDirectoryLimit" });
+});
+
+test("directory read errors are surfaced instead of silently uploading incomplete folders", async () => {
+  const denied = { name: "denied", isDirectory: true, createReader: () => ({ readEntries: (_, reject) => reject(new Error("denied")) }) };
+  await assert.rejects(droppedFiles(transferItems(denied)), /denied/);
+});
+
+test("directory uploads send a single multipart request with paths and no manual multipart content type", async (context) => {
+  environment(context);
+  const entries = [{ path: "results/sub/file.txt", blob: new Blob(["data"]) }, { path: "results/empty/", blob: new Blob([]) }];
+  const upload = sendUpload({ kind: "directory", name: "results", entries, token: "token" });
+  const request = FakeXHR.instances[0];
+  assert.equal(request.method, "POST");
+  assert.equal(request.url, "/upload");
+  assert.equal(request.headers["X-Upload-Token"], "token");
+  assert.equal(request.headers["X-FluxDrop-Directory"], "files");
+  assert.equal(request.headers["Content-Type"], undefined);
+  const parts = request.body.getAll("file");
+  assert.deepEqual(parts.map((part) => part.name), ["results/sub/file.txt", "results/empty/"]);
+  assert.equal(await parts[0].text(), "data");
+  request.respond(201, { ...success("results"), kind: "directory", download_filename: "results.zip" });
+  await upload.promise;
+});
+
+test("folder selection uploads as one item and gives the result a ZIP filename", async (context) => {
+  const { $, state } = environment(context);
+  $("directory-input").files = [Object.assign(file("one.txt", "first"), { webkitRelativePath: "results/sub/one.txt" }), Object.assign(file("two.txt"), { webkitRelativePath: "results/two.txt" })];
+  await $("directory-input").dispatch("change");
+  await tick();
+  assert.equal(FakeXHR.instances.length, 1);
+  assert.equal(FakeXHR.instances[0].url, "/upload");
+  assert.equal($("choose-directory").disabled, true);
+  FakeXHR.instances[0].respond(201, { ...success("results"), kind: "directory", download_filename: "results.zip" });
+  await tick();
+  const controls = $("upload-results").children[0].children[1];
+  assert.equal(controls.children[2].download, "results.zip");
+  assert.match(controls.children[2].textContent, /downloadZip/);
+  assert.equal(state.refreshed, 1);
+});
+
+test("locking during directory enumeration prevents any later upload", async (context) => {
+  const { document, state, controller } = environment(context);
+  let complete;
+  const folder = { name: "folder", isDirectory: true, createReader: () => ({ readEntries: (resolve) => { complete = resolve; } }) };
+  const dropping = document.dispatch("drop", { dataTransfer: transferItems(folder) });
+  await tick();
+  assert.equal(controller.isBusy(), true);
+  state.allowed = false;
+  controller.reset();
+  complete([]);
+  await dropping;
+  assert.equal(FakeXHR.instances.length, 0);
+  assert.equal(controller.isBusy(), false);
 });
 
 test("raw uploads encode names, send the token and body, and expose progress and HTTP auth errors", async (context) => {

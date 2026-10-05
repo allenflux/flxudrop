@@ -1,6 +1,6 @@
 const PREVIEW_TIMEOUT_MS = 15000;
 
-function localFileUrl(value, prefix) {
+export function localFileUrl(value, prefix) {
   if (typeof value !== "string" || !value.startsWith(prefix) || /[\\\r\n]/.test(value)) return null;
   try {
     const url = new URL(value, location.href);

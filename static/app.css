@@ -62,6 +62,8 @@ th:last-child { width: 32%; }
 .notice { padding: 10px 12px; border-left: 2px solid #aaa; background: #f4f4f5; font-size: .875rem; overflow-wrap: anywhere; }
 .notice.error { color: #922; border-color: #922; }
 .upload-help { margin-bottom: 32px; }
+.directory-command-heading { margin-top: 24px; }
+.directory-command-heading h3 { margin: 0; font-size: 1rem; font-weight: 600; }
 code, pre { background: #f4f4f5; border-radius: 6px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .875rem; }
 pre { padding: 16px; overflow: auto; }
@@ -121,4 +123,29 @@ textarea { display: block; width: 100%; min-height: 158px; resize: vertical; pad
 @media (max-width: 380px) {
   .input-row { flex-direction: column; }
   .batch-actions { width: 100%; margin-left: 0; }
+}
+
+.upload-picker-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+#directory-example { white-space: pre-wrap; overflow-wrap: anywhere; }
+.create-panel > .directory-picker-hint { margin: 12px 0 0; }
+.folder-badge { display: inline-block; margin-top: 4px; padding: 1px 6px; border-radius: 4px; color: #735517; background: #fff5d9; font-size: .75rem; }
+.directory-dialog { width: min(880px, calc(100% - 32px)); max-height: calc(100dvh - 48px); overflow: auto; }
+#directory-title { min-width: 0; overflow-wrap: anywhere; }
+#close-directory { flex: 0 0 auto; }
+.directory-breadcrumbs { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 0; }
+.directory-breadcrumbs .breadcrumb { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.directory-breadcrumbs .breadcrumb[aria-current="location"] { opacity: 1; color: #555; background: #f4f4f5; }
+.directory-toolbar { display: flex; gap: 8px; margin: 6px 0 14px; }
+.directory-entries { list-style: none; padding: 0; margin: 0; }
+.directory-entry { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-bottom: 1px solid #e5e5e5; }
+.directory-entry-info { flex: 1; min-width: 0; }
+.entry-name { display: block; max-width: 100%; padding: 0; border: 0; background: none; color: #222; font-size: .875rem; text-align: left; overflow-wrap: anywhere; }
+.entry-name:hover { text-decoration: underline; }
+.directory-entry-info > .field-help { display: block; margin-top: 4px; }
+.directory-entry .file-actions { flex: 0 0 auto; }
+@media (max-width: 480px) {
+  .directory-dialog { padding: 16px; }
+  .directory-entry { flex-wrap: wrap; }
+  .directory-entry-info { flex-basis: 100%; }
+  .directory-entry .file-actions { margin-left: auto; }
 }
