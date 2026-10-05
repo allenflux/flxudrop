@@ -27,6 +27,8 @@ class _LimitedTarStream:
     def __init__(self, source, max_bytes: int):
         self.source = source
         self.remaining = max_bytes
+        self.total_read = 0
+        self.last_nonzero = -1
 
     def read(self, size: int) -> bytes:
         if size < 0:
@@ -35,25 +37,43 @@ class _LimitedTarStream:
         self.remaining -= len(chunk)
         if self.remaining < 0:
             raise OverflowError("Expanded directory archive is larger than the configured limit")
+        # bytes.rstrip performs this scan in C, with at most one chunk retained.
+        nonzero_prefix = chunk.rstrip(b"\0")
+        if nonzero_prefix:
+            self.last_nonzero = self.total_read + len(nonzero_prefix) - 1
+        self.total_read += len(chunk)
         return chunk
 
 
 def convert_tar_directory(source_path: Path, target_path: Path, max_bytes: int):
     index = _DirectoryIndex(max_bytes)
     records = metadata_bytes = 0
-    saw_end = False
+    content_end = 0
 
     class BoundedTarInfo(tarfile.TarInfo):
         @classmethod
         def frombuf(cls, buf, encoding, errors):
-            nonlocal records, metadata_bytes, saw_end
+            return cls._checked_frombuf(buf, encoding, errors)
+
+        @classmethod
+        def _frombuf(cls, buf, encoding, errors, *, dircheck=True):
+            # Newer Python security releases call this private decoder directly,
+            # including from recursive PAX/GNU extended-header processing.
+            return cls._checked_frombuf(buf, encoding, errors, dircheck=dircheck)
+
+        @classmethod
+        def _checked_frombuf(cls, buf, encoding, errors, *, dircheck=True):
+            nonlocal records, metadata_bytes
             if len(buf) != tarfile.BLOCKSIZE:
                 raise ValueError("Directory tar archive is truncated")
             if buf == b"\0" * tarfile.BLOCKSIZE:
-                saw_end = True
                 raise tarfile.EOFHeaderError("End of tar archive")
             try:
-                info = super().frombuf(buf, encoding, errors)
+                decoder = getattr(super(), "_frombuf", None)
+                if decoder is None:
+                    info = super().frombuf(buf, encoding, errors)
+                else:
+                    info = decoder(buf, encoding, errors, dircheck=dircheck)
             except tarfile.HeaderError as exc:
                 # TarFile.next otherwise tolerates invalid headers after a file.
                 raise ValueError("Invalid directory tar header") from exc
@@ -105,6 +125,7 @@ def convert_tar_directory(source_path: Path, target_path: Path, max_bytes: int):
                 # stay literal and pass through the shared traversal checks.
                 name = member.name.removeprefix("./")
                 path = index.add(name, member.isdir(), member.size)
+                content_end = member.offset_data + (member.size + 511) // 512 * 512
                 info = zipfile.ZipInfo(path + ("/" if member.isdir() else ""))
                 info.external_attr = (0o40700 if member.isdir() else 0o100600) << 16
                 info.file_size = member.size
@@ -123,14 +144,14 @@ def convert_tar_directory(source_path: Path, target_path: Path, max_bytes: int):
                                 remaining -= len(chunk)
                 # TarFile versions before 3.13 cache stream entries by default.
                 archive.members.clear()
-            if not saw_end:
-                raise ValueError("Directory tar archive is missing its end marker")
-            padding = 0
-            while chunk := archive.fileobj.read(CHUNK_SIZE):
-                padding += len(chunk)
-                if any(chunk):
-                    raise ValueError("Unexpected data after directory tar end marker")
-            if padding < tarfile.BLOCKSIZE or padding % tarfile.BLOCKSIZE:
+            while archive.fileobj.read(CHUNK_SIZE):
+                pass
+            # Validate raw stream offsets rather than relying on which tarfile
+            # decoder callback observes EOF in a particular Python release.
+            padding = bounded.total_read - content_end
+            if bounded.last_nonzero >= content_end:
+                raise ValueError("Unexpected data after directory tar end marker")
+            if padding < 2 * tarfile.BLOCKSIZE or padding % tarfile.BLOCKSIZE:
                 raise ValueError("Directory tar archive is missing its complete end marker")
             # Draining the tar stream also drains gzip through its CRC/footer.
             return index.summary()

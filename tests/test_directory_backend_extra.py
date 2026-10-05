@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import unittest
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -96,6 +97,31 @@ def tar_bytes(entries, *, compressed=False):
     return gzip.compress(raw) if compressed else raw
 
 
+@contextmanager
+def private_tar_decoder_dispatch():
+    """Exercise the decoder dispatch used by newer Python security releases."""
+    original_private = getattr(tarfile.TarInfo, "_frombuf", None)
+    original_public = tarfile.TarInfo.frombuf.__func__
+
+    def private_decoder(cls, buf, encoding, errors, *, dircheck=True):
+        if original_private is not None:
+            return original_private.__func__(cls, buf, encoding, errors, dircheck=dircheck)
+        return original_public(cls, buf, encoding, errors)
+
+    def from_archive(cls, archive):
+        buf = archive.fileobj.read(tarfile.BLOCKSIZE)
+        # EOF detection must remain correct even if no decoder sees this block.
+        if buf == b"\0" * tarfile.BLOCKSIZE:
+            raise tarfile.EOFHeaderError("End of tar archive")
+        info = cls._frombuf(buf, archive.encoding, archive.errors, dircheck=True)
+        info.offset = archive.fileobj.tell() - tarfile.BLOCKSIZE
+        return info._proc_member(archive)
+
+    with mock.patch.object(tarfile.TarInfo, "_frombuf", classmethod(private_decoder), create=True):
+        with mock.patch.object(tarfile.TarInfo, "fromtarfile", classmethod(from_archive)):
+            yield
+
+
 class DirectoryTarStreamTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -177,6 +203,47 @@ class DirectoryTarStreamTests(unittest.TestCase):
         info.pax_headers = {"size": "-1"}
         with self.assertRaisesRegex(ValueError, "entry size"):
             self.convert(tar_bytes([(info, b"")]))
+
+    def test_private_decoder_dispatch_keeps_end_markers_and_counts_each_header_once(self):
+        with private_tar_decoder_dispatch(), mock.patch("fluxdrop_tar.MAX_TAR_RECORDS", 1):
+            summary = self.convert(tar_bytes([("root/file.txt", b"data")], compressed=True))
+        self.assertEqual((summary.filename, summary.file_count, summary.size), ("root", 1, 4))
+
+    def test_private_decoder_dispatch_preserves_metadata_and_record_limits(self):
+        info = tarfile.TarInfo("metadata")
+        info.type = tarfile.XHDTYPE
+        info.size = 64 * 1024 + 1
+        with private_tar_decoder_dispatch():
+            with self.assertRaisesRegex(ValueError, "extended header is too large"):
+                self.convert(info.tobuf(format=tarfile.USTAR_FORMAT))
+            with mock.patch("fluxdrop_tar.MAX_TAR_RECORDS", 1):
+                with self.assertRaisesRegex(ValueError, "too many records"):
+                    self.convert(tar_bytes([("root/a", b"a"), ("root/b", b"b")]))
+
+    def test_private_decoder_dispatch_preserves_valid_pax_and_gnu_long_names(self):
+        name = "任意目录/" + "segment" * 20 + "/结果.txt"
+        for archive_format in (tarfile.PAX_FORMAT, tarfile.GNU_FORMAT):
+            raw = io.BytesIO()
+            with tarfile.open(fileobj=raw, mode="w", format=archive_format) as archive:
+                info = tarfile.TarInfo(name)
+                info.size = 4
+                archive.addfile(info, io.BytesIO(b"data"))
+            with self.subTest(format=archive_format):
+                with private_tar_decoder_dispatch(), mock.patch("fluxdrop_tar.MAX_TAR_RECORDS", 2):
+                    summary = self.convert(gzip.compress(raw.getvalue()))
+                self.assertEqual((summary.filename, summary.file_count), ("任意目录", 1))
+                with zipfile.ZipFile(self.target) as archive:
+                    self.assertEqual(archive.read(name), b"data")
+
+    def test_private_decoder_dispatch_rejects_truncated_and_nonzero_trailers(self):
+        raw = tar_bytes([("root/file", b"abc")])
+        nonzero = bytearray(raw)
+        nonzero[2048] = 1
+        with private_tar_decoder_dispatch():
+            for broken in (raw[:1024], raw[:1536], nonzero, gzip.compress(raw)[:-8]):
+                with self.subTest(length=len(broken)):
+                    with self.assertRaises(ValueError):
+                        self.convert(broken)
 
 
 class ChunkedDirectoryBodyTests(unittest.TestCase):
