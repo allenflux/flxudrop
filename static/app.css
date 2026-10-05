@@ -47,7 +47,7 @@ th, td { padding: 12px 8px; border-bottom: 1px solid #e5e5e5; vertical-align: mi
 th { font-weight: 500; color: #666; }
 th:first-child, td:first-child { padding-left: 0; }
 th:last-child, td:last-child { padding-right: 0; }
-th:nth-child(2) { width: 100px; }
+th:nth-child(2) { width: 128px; }
 th:nth-child(3) { width: 190px; }
 th:last-child { width: 200px; }
 .file-info strong { display: block; font-size: .875rem; font-weight: 500; overflow-wrap: anywhere; }
