@@ -3,7 +3,7 @@ import { translate } from "/static/i18n.mjs";
 import { setupUploads, copyText } from "/static/browser-upload.mjs";
 import { setupPreview, localFileUrl } from "/static/file-preview.mjs";
 import { setupDirectoryBrowser } from "/static/directory-browser.mjs";
-import { createStorageController, hasStorage, isHot, activeStorageJob, storageProgress, storageFileId, restoreBatch } from "/static/file-storage.mjs";
+import { createStorageController, hasStorage, isHot, activeStorageJob, storageProgress, storageFileId, restoreBatch, pollStorageFiles } from "/static/file-storage.mjs";
 
 const $ = (id) => document.getElementById(id);
 let language = navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
@@ -32,7 +32,7 @@ let storageTimer = null;
 let storagePollingSession = null;
 let preparingDownload = false;
 let downloadController = null;
-const coldSubmitting = new Set();
+const coldSubmitting = new Map();
 const storageErrors = new Map();
 const directoryCommandNotices = new Map();
 const fileStates = new Map();
@@ -120,23 +120,25 @@ function updateStorage(id, snapshot) {
 
 function scheduleStoragePoll() {
   if (storageTimer !== null || storagePollingSession === storageSession || !loaded) return;
-  const targets = liveFiles().filter((file) => activeStorageJob(file) || ["archiving", "evicting", "restoring"].includes(file.storage_state));
-  if (!targets.length) return;
+  const needsPoll = (file) => activeStorageJob(file) || ["archiving", "evicting", "restoring"].includes(file.storage_state);
+  if (!liveFiles().some(needsPoll)) return;
   const session = storageSession;
   storageTimer = setTimeout(async () => {
     storageTimer = null;
     storagePollingSession = session;
     try {
-      for (const file of targets) {
-        if (session !== storageSession) return;
-        if (isRemoved(file.file_id)) continue;
-        try { await storage.read(file); }
-        catch (error) {
-          if (session !== storageSession) return;
-          storageErrors.set(file.file_id, error);
-          updateRow(file);
-        }
-      }
+      // Include tasks submitted during the delay, and refresh visible rows first.
+      const priority = (file) => (visibleRows.has(file.file_id) ? 2 : 0) + (file.storage_job?.state === "running" ? 1 : 0);
+      const targets = liveFiles().filter(needsPoll).sort((a, b) => priority(b) - priority(a));
+      await pollStorageFiles(targets, (file) => isRemoved(file.file_id) ? undefined : storage.read(file), {
+        isCurrent: () => session === storageSession,
+        onError: (file, error) => {
+          const current = files.find((item) => item.file_id === file.file_id);
+          if (!current || isRemoved(current.file_id) || !needsPoll(current)) return;
+          storageErrors.set(current.file_id, error);
+          updateRow(current);
+        },
+      });
     } finally {
       if (storagePollingSession === session) storagePollingSession = null;
       if (session === storageSession) scheduleStoragePoll();
@@ -174,7 +176,7 @@ async function downloadFile(file, event) {
 async function setCold(file) {
   if (!storageEnabled || coldSubmitting.has(file.file_id) || isRemoved(file.file_id) || !isHot(file) || activeStorageJob(file)) return false;
   const session = storageSession;
-  coldSubmitting.add(file.file_id);
+  coldSubmitting.set(file.file_id, file.storage_job?.job_id || null);
   storageErrors.delete(file.file_id);
   updateRow(file);
   updateControls();
@@ -286,21 +288,27 @@ function updateStorageRow(file, controls, removed) {
   const job = file.storage_job;
   const active = activeStorageJob(file);
   const current = file.storage_state || "hot";
-  const submitting = coldSubmitting.has(file.file_id);
-  const error = storageErrors.get(file.file_id) || (job?.state === "failed" ? Object.assign(new Error(job.error || t("requestError")), { code: job.error_code }) : null);
+  const submitting = coldSubmitting.has(file.file_id)
+    && !(job?.state === "completed" && job.job_id !== coldSubmitting.get(file.file_id));
+  const jobError = job?.state === "failed" || (job?.state === "retry" && job.error)
+    ? Object.assign(new Error(job.error || t("requestError")), { code: job.error_code }) : null;
+  const error = storageErrors.get(file.file_id) || jobError;
   const labelKey = { hot: "storageHot", hot_backed: "storageHotBacked", archiving: "storageArchiving", evicting: "storageEvicting", cold: "storageCold", restoring: "storageRestoring" }[current] || "storageHot";
   let label = t(labelKey);
-  if (submitting || (active && job.state === "queued")) label = t(job?.kind === "restore" ? "storageRestoreQueued" : "storageArchiveQueued");
-  else if (active && job.state === "retry") label = t("storageRetrying");
-  if (active && storageProgress(job) !== null) label += ` · ${storageProgress(job)}%`;
-  controls.storageStatus.textContent = label;
-  controls.storageProgress.hidden = !active;
-  if (active) {
-    const percent = storageProgress(job);
-    if (percent === null) controls.storageProgress.removeAttribute("value");
-    else controls.storageProgress.value = percent;
-    controls.storageProgress.setAttribute("aria-label", label);
+  if (submitting || (active && job.state === "queued")) {
+    label = t(job?.kind === "restore" ? "storageRestoreQueued" : "storageArchiveQueued");
+    if (Number.isInteger(job?.queue_position) && job.queue_position > 0) label += ` · ${t("storageQueuePosition", { position: job.queue_position })}`;
+  } else if (active && job.state === "retry") {
+    label = typeof job.retry_after === "number" && Number.isFinite(job.retry_after) && job.retry_after > 0
+      ? t("storageRetryAfter", { seconds: Math.ceil(job.retry_after) }) : t("storageRetrying");
+  } else if (active && job.state === "running") {
+    const phaseKey = { preparing: "storagePhasePreparing", uploading: "storagePhaseUploading", verifying: "storagePhaseVerifying", evicting: "storageEvicting", restoring: "storageRestoring" }[job.phase];
+    if (phaseKey) label = t(phaseKey);
   }
+  const percent = !submitting && job?.state === "running" ? storageProgress(job) : null;
+  if (percent > 0) label += ` · ${percent}%`;
+  controls.storageStatus.textContent = label;
+  updateStorageProgress(file, controls, { active, submitting, percent, label, removed });
   controls.storageError.hidden = !error || removed;
   controls.storageError.textContent = error ? storageErrorMessage(error) : "";
   controls.storageRetry.hidden = !error || active || removed;
@@ -310,6 +318,60 @@ function updateStorageRow(file, controls, removed) {
   controls.cold.textContent = t(current === "cold" ? "alreadyCold" : "setCold");
   controls.cold.disabled = removed || deleting || uploads.isBusy() || !storageEnabled || submitting || active || !isHot(file);
   controls.cold.title = storageEnabled ? t("setColdNamed", { name: file.filename }) : t("storageDisabled");
+}
+
+function clearStorageAnimation(controls) {
+  const visual = controls.storageVisual;
+  if (visual.timer !== null) clearTimeout(visual.timer);
+  visual.timer = null;
+  visual.completing = false;
+  visual.version++;
+}
+
+function updateStorageProgress(file, controls, { active, submitting, percent, label, removed }) {
+  const visual = controls.storageVisual;
+  const bar = controls.storageProgress;
+  const job = file.storage_job;
+  const jobId = job?.job_id || null;
+  const changedJob = visual.jobId !== jobId;
+  const completed = job?.state === "completed" && storageProgress(job) === 100;
+  const busy = !removed && (active || submitting);
+  const finish = !removed && !busy && completed && visual.busy && (visual.active || changedJob);
+  if (removed || changedJob || !completed || busy) clearStorageAnimation(controls);
+  if (busy) {
+    const indeterminate = percent === null || percent === 0;
+    bar.hidden = false;
+    bar.classList.toggle("is-indeterminate", indeterminate);
+    controls.storageProgressFill.style.width = `${percent ?? 0}%`;
+    if (indeterminate) bar.removeAttribute("aria-valuenow");
+    else bar.setAttribute("aria-valuenow", percent);
+  } else if (finish) {
+    bar.hidden = false;
+    bar.classList.remove("is-indeterminate");
+    bar.setAttribute("aria-valuenow", 100);
+    // A tiny file can finish before the submission frame was painted. Establish
+    // its current width before changing the target so this transition still runs.
+    void bar.offsetWidth;
+    controls.storageProgressFill.style.width = "100%";
+    visual.completing = true;
+    const version = visual.version;
+    const session = storageSession;
+    visual.timer = setTimeout(() => {
+      if (session !== storageSession || visibleRows.get(file.file_id) !== controls || visual.version !== version) return;
+      visual.timer = null;
+      visual.completing = false;
+      bar.hidden = true;
+    }, 800);
+  } else if (!visual.completing) {
+    bar.hidden = true;
+    bar.classList.remove("is-indeterminate");
+    bar.removeAttribute("aria-valuenow");
+    controls.storageProgressFill.style.width = "0%";
+  }
+  bar.setAttribute("aria-label", label);
+  visual.jobId = jobId;
+  visual.busy = busy;
+  visual.active = active;
 }
 
 function lock() {
@@ -334,6 +396,7 @@ function lock() {
   files = [];
   selectedIds.clear();
   fileStates.clear();
+  for (const controls of visibleRows.values()) clearStorageAnimation(controls);
   visibleRows.clear();
   pendingDeletion = [];
   uploads.reset();
@@ -373,6 +436,7 @@ function renderFiles() {
   const view = pageFiles(files, page);
   page = view.page;
   const fragment = document.createDocumentFragment();
+  for (const controls of visibleRows.values()) clearStorageAnimation(controls);
   visibleRows.clear();
   const dateFormat = new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" });
   for (const file of view.items) {
@@ -422,10 +486,16 @@ function renderFiles() {
     const storageStatus = document.createElement("span");
     storageStatus.className = "storage-status";
     storageStatus.setAttribute("role", "status");
-    const storageProgressElement = document.createElement("progress");
+    const storageProgressElement = document.createElement("span");
     storageProgressElement.className = "storage-progress";
-    storageProgressElement.max = 100;
+    storageProgressElement.setAttribute("role", "progressbar");
+    storageProgressElement.setAttribute("aria-valuemin", "0");
+    storageProgressElement.setAttribute("aria-valuemax", "100");
     storageProgressElement.hidden = true;
+    const storageProgressFill = document.createElement("span");
+    storageProgressFill.className = "storage-progress-fill";
+    storageProgressFill.setAttribute("aria-hidden", "true");
+    storageProgressElement.append(storageProgressFill);
     const storageErrorElement = document.createElement("span");
     storageErrorElement.className = "storage-error field-help";
     const storageTaskActions = document.createElement("div");
@@ -486,7 +556,7 @@ function renderFiles() {
     actions.append(previewButton, download, copy, remove, cold);
     actionsCell.append(actions);
     row.append(nameCell, size, created, storageCell, actionsCell);
-    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove, preview: previewButton, copy, cold, storageStatus, storageProgress: storageProgressElement, storageError: storageErrorElement, storageCancel, storageRetry });
+    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove, preview: previewButton, copy, cold, storageStatus, storageProgress: storageProgressElement, storageProgressFill, storageVisual: { jobId: null, busy: false, active: false, completing: false, timer: null, version: 0 }, storageError: storageErrorElement, storageCancel, storageRetry });
     updateRow(file);
     fragment.append(row);
   }

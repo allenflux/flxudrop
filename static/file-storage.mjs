@@ -11,6 +11,21 @@ export function storageProgress(job) {
     ? Math.round(Math.max(0, Math.min(100, job.progress))) : null;
 }
 
+// Status reads are independent: one slow response must not hold every later row.
+// Keep a small pool so a large archive queue does not flood a small VPS.
+export async function pollStorageFiles(files, read, { concurrency = 4, isCurrent = () => true, onError = () => {} } = {}) {
+  let next = 0;
+  const count = Math.min(files.length, Math.max(1, Math.trunc(concurrency) || 1));
+  async function worker() {
+    while (isCurrent() && next < files.length) {
+      const file = files[next++];
+      try { await read(file); }
+      catch (error) { if (isCurrent()) onError(file, error); }
+    }
+  }
+  await Promise.all(Array.from({ length: count }, worker));
+}
+
 export function restorePath(file, preview = false) {
   const id = storageFileId(file);
   if (!id) throw new Error("Missing file ID");
@@ -47,26 +62,52 @@ function restoreError(snapshot) {
 // preview stops its requests without cancelling another reader's restoration.
 export function createStorageController({ request, onUpdate = () => {}, delay = storageDelay, pollInterval = 1200, maxWait = 600000 }) {
   const pending = new Map();
+  const snapshots = new Map();
 
-  function publish(id, snapshot) {
-    onUpdate(id, snapshot);
+  async function snapshotRequest(id, path, method, options = {}, publish = true) {
+    let order = snapshots.get(id);
+    if (!order) {
+      order = { epoch: 0, sequence: 0, published: 0, mutations: 0 };
+      snapshots.set(id, order);
+    }
+    const mutation = method !== "GET";
+    const epoch = mutation ? ++order.epoch : order.epoch;
+    const sequence = ++order.sequence;
+    // A read admitted before a write, or while that write is still pending,
+    // cannot describe the acknowledged result of the write.
+    const readable = order.mutations === 0;
+    if (mutation) order.mutations++;
+    let snapshot;
+    try { snapshot = await request(path, method, options); }
+    finally { if (mutation) order.mutations--; }
+    if (options.signal?.aborted) throw aborted();
+    const previous = order.snapshot?.storage_job;
+    const job = snapshot.storage_job;
+    const terminalRollback = !mutation && order.acceptedEpoch === epoch && previous?.job_id && previous.job_id === job?.job_id
+      && ["completed", "cancelled", "failed"].includes(previous.state) && ACTIVE_JOB_STATES.has(job.state);
+    if (publish && !terminalRollback && epoch === order.epoch && (mutation || (readable && sequence >= order.published))) {
+      order.published = sequence;
+      order.acceptedEpoch = epoch;
+      order.snapshot = snapshot;
+      onUpdate(id, snapshot);
+    }
     return snapshot;
   }
 
   async function read(file, options = {}) {
     const id = storageFileId(file);
-    return publish(id, await request(`/api/files/${encodeURIComponent(id)}/storage`, "GET", options));
+    return snapshotRequest(id, `/api/files/${encodeURIComponent(id)}/storage`, "GET", options);
   }
 
   async function setCold(file) {
     const id = storageFileId(file);
-    return publish(id, await request(`/api/files/${encodeURIComponent(id)}/cold`, "POST"));
+    return snapshotRequest(id, `/api/files/${encodeURIComponent(id)}/cold`, "POST");
   }
 
   async function cancel(file) {
     const job = file.storage_job;
     if (!job?.job_id || !job.cancellable) throw Object.assign(new Error("This task can no longer be cancelled"), { status: 409 });
-    await request(`/api/storage-jobs/${encodeURIComponent(job.job_id)}/cancel`, "POST");
+    await snapshotRequest(storageFileId(file), `/api/storage-jobs/${encodeURIComponent(job.job_id)}/cancel`, "POST", {}, false);
     return read(file);
   }
 
@@ -82,18 +123,17 @@ export function createStorageController({ request, onUpdate = () => {}, delay = 
       const task = run;
       task.promise = Promise.resolve().then(async () => {
         const started = Date.now();
-        let snapshot = await request(path, "POST", { signal: task.controller.signal });
+        let snapshot = await snapshotRequest(storageFileId(file), path, "POST", { signal: task.controller.signal });
         for (;;) {
           if (task.controller.signal.aborted) throw aborted();
           if (!hasStorage(snapshot)) throw new Error("Invalid storage status response");
-          publish(storageFileId(file), snapshot);
           task.latest = snapshot;
           for (const listener of task.listeners) listener.progress(snapshot);
           if (isHot(snapshot)) return snapshot;
           if (["failed", "cancelled"].includes(snapshot.storage_job?.state)) throw restoreError(snapshot);
           if (Date.now() - started >= maxWait) throw Object.assign(new Error("Restoration is still pending. Please retry later."), { code: "restore_timeout" });
           await delay(pollInterval, task.controller.signal);
-          snapshot = await request(`/api/files/${encodeURIComponent(storageFileId(file))}/storage`, "GET", { signal: task.controller.signal });
+          snapshot = await snapshotRequest(storageFileId(file), `/api/files/${encodeURIComponent(storageFileId(file))}/storage`, "GET", { signal: task.controller.signal });
         }
       }).finally(() => { if (pending.get(path) === task) pending.delete(path); });
     }

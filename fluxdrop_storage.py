@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -471,14 +472,16 @@ class ColdStorage:
             row = db.execute("SELECT deleted_at FROM files WHERE file_id=?", (file_id,)).fetchone()
             return row is not None and row["deleted_at"] is not None
 
-    @staticmethod
-    def _job_info(row) -> dict | None:
+    def _job_info(self, row) -> dict | None:
         if row is None:
             return None
         return {"job_id": row["job_id"], "file_id": row["file_id"], "kind": row["kind"],
                 "state": row["state"], "progress": min(100, max(0, row["progress"])),
                 "error": row["error"], "attempts": row["attempts"],
                 "error_code": row["error_code"],
+                "phase": json.loads(row["details"]).get("phase"),
+                "queue_position": None,
+                "retry_after": max(0, math.ceil(row["next_run"] - self._clock())) if row["state"] == "retry" else 0,
                 "cancellable": row["kind"] == "archive" and row["state"] in _ACTIVE}
 
     def storage_info(self, file_id: str) -> dict:
@@ -487,8 +490,15 @@ class ColdStorage:
                     "error": None, "remote_verified": False, "cached": self.cached_metadata(file_id)}
         with self._db() as db:
             row = self._file(db, file_id)
-            job = db.execute("SELECT * FROM jobs WHERE file_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (file_id,)).fetchone()
-            return {"file_id": file_id, "state": row["state"], "job": self._job_info(job),
+            job = db.execute("SELECT rowid AS queue_order,* FROM jobs WHERE file_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1", (file_id,)).fetchone()
+            info = self._job_info(job)
+            if job and job["state"] in {"queued", "retry"} and job["next_run"] <= self._clock():
+                ahead = db.execute("""SELECT COUNT(*) FROM jobs WHERE kind=? AND job_id<>? AND
+                    (state='running' OR (state IN ('queued','retry') AND next_run<=? AND
+                    (created_at<? OR (created_at=? AND rowid<?))))""",
+                    (job["kind"], job["job_id"], self._clock(), job["created_at"], job["created_at"], job["queue_order"])).fetchone()[0]
+                info["queue_position"] = ahead + 1
+            return {"file_id": file_id, "state": row["state"], "job": info,
                     "job_id": job["job_id"] if job else None, "error": row["error"],
                     "last_content_access_at": row["last_access"], "remote_verified": bool(row["remote_verified"]),
                     "cached": json.loads(row["cached"])}
@@ -767,7 +777,7 @@ class ColdStorage:
         stat = path.stat()
         return _json([stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns])
 
-    def _checkpoint(self, job_id: str, token: str, *, progress: float | None = None, details: dict | None = None) -> None:
+    def _checkpoint(self, job_id: str, token: str, *, progress: float | None = None, details: dict | None = None, phase: str | None = None) -> None:
         if self._stop.is_set():
             raise _JobCancelled()
         with self._db(True) as db:
@@ -776,10 +786,19 @@ class ColdStorage:
                 raise _JobCancelled()
             if job["kind"] != "delete":
                 self._file(db, job["file_id"])
+            encoded = job["details"]
+            if details is not None or phase is not None:
+                saved = json.loads(encoded)
+                updated = dict(details) if details is not None else saved
+                if phase is not None:
+                    updated["phase"] = phase
+                elif "phase" in saved:
+                    updated["phase"] = saved["phase"]
+                encoded = _json(updated)
             db.execute("UPDATE jobs SET lease_until=?,progress=?,details=? WHERE job_id=?",
                        (self._clock() + self.settings.task_lease_seconds,
                         progress if progress is not None else job["progress"],
-                        _json(details) if details is not None else job["details"], job_id))
+                        encoded, job_id))
 
     def _remote_call(self, method: str, *args):
         with self._db() as db:
@@ -898,6 +917,7 @@ class ColdStorage:
     def _archive(self, job, token: str) -> None:
         file_id = job["file_id"]
         path = self.files_dir / file_id
+        self._checkpoint(job["job_id"], token, phase="preparing")
         with self._guard(file_id), self._db(True) as db:
             row = self._file(db, file_id)
             if row["access_epoch"] != job["access_epoch"]:
@@ -907,6 +927,7 @@ class ColdStorage:
         if row["remote_verified"]:
             # Reuse existing objects, but do not trust their continued existence
             # or integrity merely because they passed verification previously.
+            self._checkpoint(job["job_id"], token, phase="verifying")
             manifest, dek = self._read_manifest(row)
             digest = hashlib.sha256()
             for chunk in manifest["chunks"]:
@@ -920,7 +941,7 @@ class ColdStorage:
             self._evict(job, token)
             return
         details = json.loads(job["details"])
-        if not details:
+        if not details.get("generation"):
             generation = uuid.uuid4().hex
             dek = secrets.token_bytes(32)
             wrap_nonce = secrets.token_bytes(12)
@@ -966,6 +987,7 @@ class ColdStorage:
                 # Persist nonce and expected ciphertext before any remote write.
                 self._checkpoint(job["job_id"], token, details=details)
                 if not record["uploaded"]:
+                    self._checkpoint(job["job_id"], token, phase="uploading")
                     self._upload(job, token, record["key"], ciphertext)
                     record["uploaded"] = True
                     self._checkpoint(job["job_id"], token, details=details)
@@ -987,8 +1009,10 @@ class ColdStorage:
         if len(manifest_data) > self.settings.max_object_bytes:
             raise StorageConfigurationError("Archive manifest exceeds its object limit")
         manifest_key = self._base(file_id) + details["generation"] + "/manifest.json"
+        self._checkpoint(job["job_id"], token, phase="uploading")
         self._upload(job, token, manifest_key, manifest_data)
         row.update(manifest_key=manifest_key, manifest_sha=_sha(manifest_data), content_sha=digest.hexdigest())
+        self._checkpoint(job["job_id"], token, phase="verifying", progress=50)
         verified_manifest, verified_dek = self._read_manifest(row)
         verified_hash = hashlib.sha256()
         for record in verified_manifest["chunks"]:
@@ -1009,7 +1033,7 @@ class ColdStorage:
         import fcntl
         file_id = job["file_id"]
         with self._guard(file_id), (self._lock_dir / (file_id + ".pin")).open("a+b") as pin:
-            self._checkpoint(job["job_id"], token)
+            self._checkpoint(job["job_id"], token, phase="evicting")
             try:
                 fcntl.flock(pin, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -1035,6 +1059,7 @@ class ColdStorage:
 
     def _restore(self, job, token: str) -> None:
         file_id = job["file_id"]
+        self._checkpoint(job["job_id"], token, phase="restoring")
         with self._guard(file_id), self._db(True) as db:
             row = dict(self._file(db, file_id))
             db.execute("UPDATE files SET state='restoring',error=NULL WHERE file_id=?", (file_id,))
@@ -1121,7 +1146,7 @@ class ColdStorage:
                 skip_sql = " AND job_id NOT IN (" + ",".join("?" for _ in skipped) + ")" if skipped else ""
                 job = db.execute("""SELECT * FROM jobs WHERE ((state IN ('queued','retry') AND next_run<=?)
                              OR (state='running' AND lease_until<=?))""" + kind_sql + skip_sql +
-                             " ORDER BY CASE kind WHEN 'restore' THEN 0 WHEN 'delete' THEN 1 ELSE 2 END,created_at LIMIT 1",
+                             " ORDER BY CASE kind WHEN 'restore' THEN 0 WHEN 'delete' THEN 1 ELSE 2 END,created_at,rowid LIMIT 1",
                              (self._clock(), self._clock(), *(kinds or ()), *skipped)).fetchone()
                 if job is None:
                     break
@@ -1296,13 +1321,20 @@ class ColdStorage:
                 continue
 
     def start_worker(self) -> None:
-        if not self.enabled or self._threads:
+        if not self.enabled:
             return
-        self._stop.clear()
 
         def worker(kinds):
             while not self._stop.is_set():
-                worked = self.run_pending(kinds=kinds)
+                try:
+                    worked = self.run_pending(kinds=kinds)
+                except Exception as exc:
+                    # Claiming a job, opening its lock or recording a failure can
+                    # fail outside _execute_job. Keep the scheduler alive without
+                    # exposing SDK request details or configuration in the log.
+                    LOG.warning("Storage %s scheduler encountered %s; retrying", "/".join(kinds), type(exc).__name__)
+                    self._stop.wait(min(1, self.settings.retry_base_seconds))
+                    continue
                 if not worked:
                     self._wake.wait(0.5)
                     self._wake.clear()
@@ -1310,22 +1342,35 @@ class ColdStorage:
         def maintenance():
             last_scan = 0
             while not self._stop.wait(1):
-                now = self._clock()
-                with self._db(True) as db:
-                    db.execute("UPDATE owners SET heartbeat=? WHERE owner=?", (now, self._owner))
-                self.reap_dead_owners()
-                if now - last_scan >= self.settings.scan_seconds:
-                    self.scan_pressure()
-                    self.scan_idle()
-                    self.cleanup_orphans()
-                    last_scan = now
+                try:
+                    now = self._clock()
+                    with self._db(True) as db:
+                        db.execute("UPDATE owners SET heartbeat=? WHERE owner=?", (now, self._owner))
+                    self.reap_dead_owners()
+                    if now - last_scan >= self.settings.scan_seconds:
+                        self.scan_pressure()
+                        self.scan_idle()
+                        self.cleanup_orphans()
+                        last_scan = now
+                except Exception as exc:
+                    LOG.warning("Storage maintenance encountered %s; retrying", type(exc).__name__)
 
-        for target, args, name in ((worker, (("restore", "delete"),), "fluxdrop-restore"),
-                                   (worker, (("archive",),), "fluxdrop-archive"),
-                                   (maintenance, (), "fluxdrop-storage-maintenance")):
-            thread = threading.Thread(target=target, args=args, name=name, daemon=True)
-            self._threads.append(thread)
-            thread.start()
+        with self._lifecycle_lock:
+            if self._stop.is_set() or self._owner_closed:
+                raise StorageUnavailable("Storage manager is stopping or closed")
+            # A previous unexpected thread exit must not make a nonempty list
+            # permanently suppress replacement. Serialize starts to avoid two
+            # callers launching duplicate live workers for the same role.
+            self._threads = [thread for thread in self._threads if thread.is_alive()]
+            live_names = {thread.name for thread in self._threads}
+            for target, args, name in ((worker, (("restore", "delete"),), "fluxdrop-restore"),
+                                       (worker, (("archive",),), "fluxdrop-archive"),
+                                       (maintenance, (), "fluxdrop-storage-maintenance")):
+                if name in live_names:
+                    continue
+                thread = threading.Thread(target=target, args=args, name=name, daemon=True)
+                self._threads.append(thread)
+                thread.start()
 
     def close(self) -> None:
         self._stop.set()

@@ -67,7 +67,15 @@ th:last-child { width: 200px; }
 .row-action[aria-disabled="true"] { pointer-events: none; }
 .set-cold { grid-column: 1 / -1; justify-self: stretch; }
 .storage-status { display: block; color: #555; font-size: .8125rem; }
-.storage-progress { display: block; width: 100%; height: 6px; margin: 7px 0; accent-color: #555; }
+.storage-progress { display: block; position: relative; width: 100%; height: 6px; margin: 7px 0; overflow: hidden; border-radius: 3px; background: #e5e5e5; }
+.storage-progress-fill { display: block; width: 0; height: 100%; background: #555; transition: width 320ms ease; }
+.storage-progress.is-indeterminate .storage-progress-fill { visibility: hidden; transition: none; }
+.storage-progress.is-indeterminate::after { content: ""; position: absolute; top: 0; left: 0; width: 32%; height: 100%; background: #555; animation: storage-activity 1.2s ease-in-out infinite; }
+@keyframes storage-activity { from { transform: translateX(-110%); } to { transform: translateX(420%); } }
+@media (prefers-reduced-motion: reduce) {
+  .storage-progress-fill { transition: none; }
+  .storage-progress.is-indeterminate::after { animation: none; left: 34%; }
+}
 .storage-error { display: block; margin-top: 5px; color: #555; overflow-wrap: anywhere; }
 .storage-task-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
 .storage-task-actions .button { min-height: 30px; padding: 4px 8px; font-size: .75rem; }

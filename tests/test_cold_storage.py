@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import sqlite3
 import tempfile
 import threading
 import time
@@ -653,6 +654,91 @@ class ColdStorageTests(unittest.TestCase):
         self.assertEqual(reopened.run_pending(), 1)
         self.assertFalse(self.remote.objects)
         self.assertTrue(reopened.is_deleted(file_id))
+
+    def test_archive_scheduler_recovers_from_transient_claim_failure(self):
+        file_id, _, _ = self.upload()
+        real_run = self.storage.run_pending
+        failed = threading.Event()
+
+        def transient_failure(*args, **kwargs):
+            if kwargs.get("kinds") == ("archive",) and not failed.is_set():
+                failed.set()
+                raise sqlite3.OperationalError("database is locked")
+            return real_run(*args, **kwargs)
+
+        self.settings.retry_base_seconds = 0.05
+        self.storage.request_cold(file_id)
+        with mock.patch.object(self.storage, "run_pending", side_effect=transient_failure), self.assertLogs("fluxdrop_storage", level="WARNING") as logs:
+            self.storage.start_worker()
+            self.assertTrue(failed.wait(2))
+            deadline = time.monotonic() + 3
+            while self.storage.storage_info(file_id)["state"] != "cold" and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(self.storage.storage_info(file_id)["state"], "cold")
+            self.assertTrue(all(thread.is_alive() for thread in self.storage._threads))
+        self.assertTrue(any("archive scheduler encountered OperationalError" in line for line in logs.output))
+
+    def test_maintenance_recovers_without_stopping_content_workers(self):
+        real_reap = self.storage.reap_dead_owners
+        failed, recovered = threading.Event(), threading.Event()
+
+        def transient_failure():
+            if not failed.is_set():
+                failed.set()
+                raise sqlite3.OperationalError("database is locked")
+            real_reap()
+            recovered.set()
+
+        with mock.patch.object(self.storage, "reap_dead_owners", side_effect=transient_failure), self.assertLogs("fluxdrop_storage", level="WARNING") as logs:
+            self.storage.start_worker()
+            self.assertTrue(failed.wait(2))
+            file_id, _, _ = self.upload()
+            self.storage.request_cold(file_id)
+            self.assertTrue(recovered.wait(2))
+            self.assertEqual(self.storage.storage_info(file_id)["state"], "cold")
+            self.assertTrue(all(thread.is_alive() for thread in self.storage._threads))
+        self.assertTrue(any("maintenance encountered OperationalError" in line for line in logs.output))
+
+    def test_start_worker_replaces_dead_role_without_duplicating_live_threads(self):
+        real_run = self.storage.run_pending
+        exited = threading.Event()
+
+        def exit_once(*args, **kwargs):
+            if kwargs.get("kinds") == ("archive",) and not exited.is_set():
+                exited.set()
+                raise SystemExit()
+            return real_run(*args, **kwargs)
+
+        with mock.patch.object(self.storage, "run_pending", side_effect=exit_once):
+            self.storage.start_worker()
+            self.assertTrue(exited.wait(2))
+            old = {thread.name: thread for thread in self.storage._threads}
+            old["fluxdrop-archive"].join(2)
+            self.assertFalse(old["fluxdrop-archive"].is_alive())
+        self.storage.start_worker()
+        current = {thread.name: thread for thread in self.storage._threads}
+        self.assertIsNot(current["fluxdrop-archive"], old["fluxdrop-archive"])
+        self.assertIs(current["fluxdrop-restore"], old["fluxdrop-restore"])
+        self.assertIs(current["fluxdrop-storage-maintenance"], old["fluxdrop-storage-maintenance"])
+        starters = [threading.Thread(target=self.storage.start_worker) for _ in range(6)]
+        for thread in starters:
+            thread.start()
+        for thread in starters:
+            thread.join(2)
+        self.assertEqual(len(self.storage._threads), 3)
+        self.assertTrue(all(thread.is_alive() for thread in self.storage._threads))
+        file_id, _, _ = self.upload()
+        self.storage.request_cold(file_id)
+        deadline = time.monotonic() + 3
+        while self.storage.storage_info(file_id)["state"] != "cold" and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.storage.storage_info(file_id)["state"], "cold")
+
+    def test_closed_manager_does_not_restart_released_owner(self):
+        self.storage.close()
+        with self.assertRaises(StorageUnavailable):
+            self.storage.start_worker()
+        self.assertTrue(self.storage._stop.is_set())
 
 
 if __name__ == "__main__":

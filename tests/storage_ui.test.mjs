@@ -53,7 +53,7 @@ const file = (storage_state = "hot", file_id = "file-id") => ({
   ...(storage_state ? { storage_state, storage_job: null } : {}),
 });
 
-async function harness(context, initial, responder = () => ({ ok: true })) {
+async function harness(context, initial, responder = () => ({ ok: true }), { manualPoll = false } = {}) {
   const nodes = new Map();
   const $ = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   const document = new Element();
@@ -62,6 +62,10 @@ async function harness(context, initial, responder = () => ({ ok: true })) {
   document.createElement = (tag) => new Element(tag);
   document.createDocumentFragment = () => Object.assign(new Element(), { fragment: true });
   const requests = [];
+  const pollTimers = [];
+  const completionTimers = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
   const globals = {
     document, navigator: { language: "zh-CN" }, localStorage: { getItem() { return null; }, setItem() {} },
     location: { href: "http://localhost/", origin: "http://localhost" },
@@ -71,6 +75,15 @@ async function harness(context, initial, responder = () => ({ ok: true })) {
       const status = data.httpStatus || 200;
       return { ok: status < 400, status, json: async () => data };
     },
+    ...(manualPoll ? {
+      setTimeout: (callback, milliseconds, ...args) => {
+        if (![1500, 800].includes(milliseconds)) return originalSetTimeout(callback, milliseconds, ...args);
+        const timer = { storagePoll: true, callback, cancelled: false };
+        (milliseconds === 1500 ? pollTimers : completionTimers).push(timer);
+        return timer;
+      },
+      clearTimeout: (timer) => timer?.storagePoll ? timer.cancelled = true : originalClearTimeout(timer),
+    } : {}),
   };
   const previous = new Map(Object.keys(globals).map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
@@ -86,7 +99,14 @@ async function harness(context, initial, responder = () => ({ ok: true })) {
   source += `\n// isolated UI fixture ${fixtureIndex++}\n`;
   await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   await tick();
-  return { $, requests, rows: () => $("file-list").children };
+  return { $, requests, rows: () => $("file-list").children, poll: async () => {
+    const timer = pollTimers.shift();
+    assert.ok(timer && !timer.cancelled, "an active storage poll is scheduled");
+    await timer.callback();
+  }, pendingPolls: () => pollTimers.filter((timer) => !timer.cancelled).length,
+  completionTimers, finishAnimations: () => {
+    for (const timer of completionTimers.splice(0)) if (!timer.cancelled) timer.callback();
+  } };
 }
 
 test("cold files remain listed and hot rows expose a visible manual cold action", async (context) => {
@@ -116,8 +136,8 @@ test("disabled storage keeps manual controls visible with configuration guidance
   assert.equal(ui.requests.length, 1);
 });
 
-test("manual archive displays queued progress and cancellation refreshes the hot state", async (context) => {
-  const job = { job_id: "archive-id", kind: "archive", state: "queued", progress: 12, error: null, cancellable: true };
+test("manual archive displays its queue position without fake progress and cancellation refreshes the hot state", async (context) => {
+  const job = { job_id: "archive-id", kind: "archive", state: "queued", progress: 12, queue_position: 3, error: null, cancellable: true };
   const ui = await harness(context, { ok: true, storage_enabled: true, files: [file()] }, (path) => {
     if (path.endsWith("/cold")) return { ok: true, storage_state: "archiving", storage_job: job };
     if (path.endsWith("/storage")) return { ok: true, storage_state: "hot", storage_job: { ...job, state: "cancelled", cancellable: false } };
@@ -126,7 +146,9 @@ test("manual archive displays queued progress and cancellation refreshes the hot
   const row = ui.rows()[0];
   await row.children[4].children[0].children[4].dispatch("click");
   await tick();
-  assert.match(row.children[3].children[0].textContent, /等待转冷.*12%/);
+  assert.equal(row.children[3].children[0].textContent, "等待转冷 · 排队第 3 个");
+  assert.equal(row.children[3].children[1].getAttribute("aria-valuenow"), null);
+  assert.equal(row.children[3].children[1].classes.has("is-indeterminate"), true);
   const cancel = row.children[3].children[3].children[0];
   assert.equal(cancel.hidden, false);
   await cancel.dispatch("click");
@@ -134,6 +156,163 @@ test("manual archive displays queued progress and cancellation refreshes the hot
   assert.equal(row.children[3].children[0].textContent, "热文件");
   assert.equal(cancel.hidden, true);
   assert.ok(ui.requests.some((request) => request.path === "/api/storage-jobs/archive-id/cancel" && request.method === "POST"));
+});
+
+test("running phases show reported progress while retries show their reason and delay", async (context) => {
+  const verifying = { ...file("archiving", "verifying"), storage_job: { state: "running", kind: "archive", phase: "verifying", progress: 63, cancellable: true } };
+  const retry = { ...file("archiving", "retry"), storage_job: { state: "retry", kind: "archive", progress: 45, retry_after: 12, error: "S3 temporarily unavailable", cancellable: true } };
+  const queued = { ...file("restoring", "queued"), storage_job: { state: "queued", kind: "restore", progress: 0, cancellable: false } };
+  const ui = await harness(context, { ok: true, storage_enabled: true, files: [verifying, retry, queued] }, undefined, { manualPoll: true });
+  const [first, second, third] = ui.rows().map((row) => row.children[3]);
+  assert.equal(first.children[0].textContent, "正在校验归档 · 63%");
+  assert.equal(first.children[1].getAttribute("aria-valuenow"), "63");
+  assert.equal(first.children[1].children[0].style.width, "63%");
+  assert.equal(second.children[0].textContent, "将在 12 秒后自动重试");
+  assert.equal(second.children[1].getAttribute("aria-valuenow"), null);
+  assert.equal(second.children[2].hidden, false);
+  assert.match(second.children[2].textContent, /S3 temporarily unavailable/);
+  assert.equal(second.children[3].children[1].hidden, true);
+  assert.equal(third.children[0].textContent, "等待恢复");
+  assert.doesNotMatch(third.children[0].textContent, /0%/);
+});
+
+test("completed archive responses update a whole queue and remain correct across pagination", async (context) => {
+  const files = Array.from({ length: 25 }, (_, index) => ({
+    ...file("archiving", `file-${index}`),
+    storage_job: { job_id: `archive-${index}`, state: "queued", kind: "archive", progress: 0, cancellable: true },
+  }));
+  const ui = await harness(context, { ok: true, storage_enabled: true, files }, () => ({
+    ok: true, storage_state: "cold", storage_job: { state: "completed", kind: "archive", progress: 100, cancellable: false },
+  }), { manualPoll: true });
+  assert.equal(ui.rows()[0].children[3].children[0].textContent, "等待转冷");
+  await ui.poll();
+  assert.equal(ui.requests.length, 26);
+  assert.ok(ui.requests.every((request) => request.cache === "no-store"));
+  for (const row of ui.rows()) {
+    assert.equal(row.children[3].children[0].textContent, "冷文件");
+    assert.equal(row.children[3].children[1].hidden, false);
+    assert.equal(row.children[3].children[1].getAttribute("aria-valuenow"), "100");
+    assert.equal(row.children[3].children[1].children[0].style.width, "100%");
+  }
+  ui.finishAnimations();
+  for (const row of ui.rows()) assert.equal(row.children[3].children[1].hidden, true);
+  await ui.$("next-page").dispatch("click");
+  assert.equal(ui.rows().length, 5);
+  for (const row of ui.rows()) assert.equal(row.children[3].children[0].textContent, "冷文件");
+  assert.equal(ui.pendingPolls(), 0);
+});
+
+test("an immediate completed POST animates completion, while historical completed jobs stay hidden", async (context) => {
+  const historical = { job_id: "old-archive", state: "completed", kind: "archive", progress: 100, cancellable: false };
+  const ui = await harness(context, { ok: true, storage_enabled: true, files: [{ ...file("hot_backed"), storage_job: historical }] }, () => ({
+    ok: true, storage_state: "cold", storage_job: { ...historical, job_id: "new-archive" },
+  }), { manualPoll: true });
+  const row = ui.rows()[0];
+  const bar = row.children[3].children[1];
+  assert.equal(bar.hidden, true);
+  assert.equal(ui.completionTimers.length, 0);
+  await row.children[4].children[0].children[4].dispatch("click");
+  await tick();
+  assert.equal(row.children[3].children[0].textContent, "冷文件");
+  assert.equal(bar.hidden, false);
+  assert.equal(bar.children[0].style.width, "100%");
+  assert.equal(row.children[4].children[0].children[4].textContent, "已是冷文件");
+  assert.equal(ui.completionTimers.length, 1);
+  ui.finishAnimations();
+  assert.equal(bar.hidden, true);
+});
+
+test("a completion timer cannot hide a new restore or repopulate a locked page", async (context) => {
+  const archived = { job_id: "archive", state: "completed", kind: "archive", progress: 100, cancellable: false };
+  const ui = await harness(context, { ok: true, storage_enabled: true, files: [file()] }, (path) => {
+    if (path.endsWith("/cold")) return { ok: true, storage_state: "cold", storage_job: archived };
+    return { ok: true, storage_state: "restoring", storage_job: { job_id: "restore", state: "running", kind: "restore", progress: 0, cancellable: false } };
+  }, { manualPoll: true });
+  const row = ui.rows()[0];
+  const bar = row.children[3].children[1];
+  await row.children[4].children[0].children[4].dispatch("click");
+  await tick();
+  const previousTimer = ui.completionTimers[0];
+  assert.ok(previousTimer);
+  await row.children[4].children[0].children[1].dispatch("click");
+  await tick();
+  assert.equal(previousTimer.cancelled, true);
+  previousTimer.callback(); // Even a callback already queued on the event loop is obsolete.
+  assert.equal(bar.hidden, false);
+  assert.equal(bar.classes.has("is-indeterminate"), true);
+  assert.equal(bar.getAttribute("aria-valuenow"), null);
+  assert.equal(row.children[3].children[0].textContent, "正在恢复");
+  await ui.$("logout").dispatch("click");
+  previousTimer.callback();
+  assert.equal(ui.rows().length, 0);
+});
+
+test("refresh and logout cancel completion holds without replaying historical completion", async (context) => {
+  const initial = { ok: true, storage_enabled: true, files: [file()] };
+  let job = 0;
+  const ui = await harness(context, initial, () => ({
+    ok: true, storage_state: "hot_backed", storage_job: { job_id: `archive-${++job}`, state: "completed", kind: "archive", progress: 100, cancellable: false },
+  }), { manualPoll: true });
+  await ui.rows()[0].children[4].children[0].children[4].dispatch("click");
+  await tick();
+  const refreshTimer = ui.completionTimers[0];
+  assert.equal(ui.rows()[0].children[3].children[1].hidden, false);
+  await ui.$("refresh").dispatch("click");
+  assert.equal(refreshTimer.cancelled, true);
+  refreshTimer.callback();
+  assert.equal(ui.rows()[0].children[3].children[1].hidden, true);
+  await ui.rows()[0].children[4].children[0].children[4].dispatch("click");
+  await tick();
+  const logoutTimer = ui.completionTimers[1];
+  assert.equal(ui.rows()[0].children[3].children[1].hidden, false);
+  await ui.$("logout").dispatch("click");
+  assert.equal(logoutTimer.cancelled, true);
+  logoutTimer.callback();
+  assert.equal(ui.rows().length, 0);
+});
+
+test("refresh reconstructs a queued task and continues polling the same job through completion", async (context) => {
+  const job = { job_id: "durable-archive", state: "queued", kind: "archive", progress: 0, cancellable: true };
+  const initial = { ok: true, storage_enabled: true, files: [{ ...file("archiving"), storage_job: job }] };
+  let reads = 0;
+  const ui = await harness(context, initial, () => {
+    reads++;
+    return reads === 1
+      ? { ok: true, storage_state: "archiving", storage_job: { ...job, state: "running", phase: "uploading", progress: 45 } }
+      : { ok: true, storage_state: "cold", storage_job: { ...job, state: "completed", progress: 100, cancellable: false } };
+  }, { manualPoll: true });
+  const beforeRefresh = ui.rows()[0];
+  await ui.$("refresh").dispatch("click");
+  assert.notEqual(ui.rows()[0], beforeRefresh);
+  assert.equal(ui.pendingPolls(), 1);
+  await ui.poll();
+  assert.equal(ui.rows()[0].children[3].children[0].textContent, "正在上传 · 45%");
+  await ui.$("refresh").dispatch("click");
+  assert.equal(ui.rows()[0].children[3].children[0].textContent, "正在上传 · 45%");
+  await ui.poll();
+  assert.equal(ui.rows()[0].children[3].children[0].textContent, "冷文件");
+  assert.equal(ui.rows()[0].children[3].children[1].getAttribute("aria-valuenow"), "100");
+  assert.equal(ui.pendingPolls(), 0);
+  assert.ok(ui.requests.filter((request) => request.path.endsWith("/storage")).every((request) => request.path === "/api/files/file-id/storage"));
+  ui.finishAnimations();
+  assert.equal(ui.rows()[0].children[3].children[1].hidden, true);
+});
+
+test("a late status error cannot overwrite a completed row supplied by refresh", async (context) => {
+  const initial = { ok: true, storage_enabled: true, files: [{
+    ...file("archiving"), storage_job: { job_id: "archive", state: "queued", kind: "archive", progress: 0, cancellable: true },
+  }] };
+  let failRead;
+  const ui = await harness(context, initial, () => new Promise((_resolve, reject) => { failRead = reject; }), { manualPoll: true });
+  const polling = ui.poll();
+  await tick();
+  initial.files = [{ ...file("cold"), storage_job: { job_id: "archive", state: "completed", kind: "archive", progress: 100, cancellable: false } }];
+  await ui.$("refresh").dispatch("click");
+  failRead(new Error("Old request failed"));
+  await polling;
+  assert.equal(ui.rows()[0].children[3].children[0].textContent, "冷文件");
+  assert.equal(ui.rows()[0].children[3].children[2].hidden, true);
+  assert.equal(ui.pendingPolls(), 0);
 });
 
 test("batch restore capacity failure gives a batching suggestion and never starts ZIP download", async (context) => {

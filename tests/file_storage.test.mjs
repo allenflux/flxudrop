@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createStorageController, restoreBatch, restorePath, activeStorageJob, storageProgress } from "../static/file-storage.mjs";
+import { createStorageController, restoreBatch, restorePath, activeStorageJob, storageProgress, pollStorageFiles } from "../static/file-storage.mjs";
 
 const cold = { file_id: "file-id", storage_state: "cold", download_url: "/f/file-id/data.bin", preview_url: "/p/file-id/data.bin" };
 const status = (storage_state, state = "running", progress = 0, extra = {}) => ({
@@ -140,4 +140,131 @@ test("progress is bounded and only queued/running/retry jobs are active", () => 
   assert.equal(storageProgress({ progress: NaN }), null);
   for (const state of ["queued", "running", "retry"]) assert.equal(activeStorageJob({ storage_job: { state } }), true);
   for (const state of ["completed", "failed", "cancelled"]) assert.equal(activeStorageJob({ storage_job: { state } }), false);
+});
+
+test("a slow status request does not block later rows and polling stays bounded", async () => {
+  const slow = deferred();
+  const rows = Array.from({ length: 12 }, (_, index) => index);
+  const completed = [];
+  const errors = [];
+  let active = 0;
+  let maxActive = 0;
+  const polling = pollStorageFiles(rows, async (row) => {
+    active++;
+    maxActive = Math.max(maxActive, active);
+    try {
+      if (row === 0) await slow.promise;
+      else await tick();
+      if (row === 4) throw new Error("Status temporarily unavailable");
+      completed.push(row);
+    } finally { active--; }
+  }, { onError: (row, error) => errors.push([row, error.message]) });
+  while (completed.length < 10) await tick();
+  assert.equal(maxActive, 4);
+  assert.equal(completed.includes(0), false);
+  assert.equal(completed.includes(11), true);
+  slow.resolve();
+  await polling;
+  assert.equal(completed.length, 11);
+  assert.deepEqual(errors, [[4, "Status temporarily unavailable"]]);
+});
+
+test("an obsolete polling session stops admitting requests and discards its errors", async () => {
+  const pending = deferred();
+  const started = [];
+  const errors = [];
+  let current = true;
+  const polling = pollStorageFiles([0, 1, 2, 3, 4, 5], async (row) => {
+    started.push(row);
+    await pending.promise;
+    throw new Error("Old response");
+  }, { isCurrent: () => current, onError: (...args) => errors.push(args) });
+  assert.deepEqual(started, [0, 1, 2, 3]);
+  current = false;
+  pending.resolve();
+  await polling;
+  assert.deepEqual(started, [0, 1, 2, 3]);
+  assert.deepEqual(errors, []);
+});
+
+test("a delayed status response cannot overwrite an acknowledged archive completion", async () => {
+  const oldRead = deferred();
+  const updates = [];
+  const controller = createStorageController({
+    request: async (_path, method) => method === "GET" ? oldRead.promise : status("cold", "completed", 100),
+    onUpdate: (_id, snapshot) => updates.push(snapshot.storage_state),
+  });
+  const polling = controller.read(cold);
+  await controller.setCold(cold);
+  oldRead.resolve(status("hot", "queued", 0));
+  await polling;
+  assert.deepEqual(updates, ["cold"]);
+});
+
+test("out-of-order reads keep the most recently requested status", async () => {
+  const oldRead = deferred();
+  const updates = [];
+  let calls = 0;
+  const controller = createStorageController({
+    request: async () => ++calls === 1 ? oldRead.promise : status("cold", "completed", 100),
+    onUpdate: (_id, snapshot) => updates.push(snapshot.storage_state),
+  });
+  const polling = controller.read(cold);
+  await controller.read(cold);
+  oldRead.resolve(status("archiving", "running", 45));
+  await polling;
+  assert.deepEqual(updates, ["cold"]);
+});
+
+test("reads made during a pending mutation cannot hide its newly accepted job", async () => {
+  const mutation = deferred();
+  const read = deferred();
+  const updates = [];
+  const controller = createStorageController({
+    request: async (_path, method) => method === "POST" ? mutation.promise : read.promise,
+    onUpdate: (_id, snapshot) => updates.push(snapshot.storage_job.state),
+  });
+  const submitting = controller.setCold(cold);
+  const polling = controller.read(cold);
+  mutation.resolve(status("archiving", "queued", 0));
+  await submitting;
+  read.resolve(status("hot", "completed", 100));
+  await polling;
+  assert.deepEqual(updates, ["queued"]);
+  await controller.read(cold);
+  assert.deepEqual(updates, ["queued", "completed"]);
+});
+
+test("a delayed queued snapshot cannot revive a cancelled job", async () => {
+  const oldRead = deferred();
+  const updates = [];
+  let reads = 0;
+  const file = { ...cold, storage_job: { job_id: "archive-id", kind: "archive", state: "queued", cancellable: true } };
+  const controller = createStorageController({
+    request: async (_path, method) => method === "POST" ? { ok: true } : ++reads === 1 ? oldRead.promise : status("hot", "cancelled", 0),
+    onUpdate: (_id, snapshot) => updates.push(snapshot.storage_job.state),
+  });
+  const polling = controller.read(file);
+  await controller.cancel(file);
+  oldRead.resolve(status("archiving", "queued", 0));
+  await polling;
+  assert.deepEqual(updates, ["cancelled"]);
+});
+
+test("a completed job does not return to queued when parallel server reads finish in reverse order", async () => {
+  const first = deferred();
+  const second = deferred();
+  const updates = [];
+  let calls = 0;
+  const controller = createStorageController({
+    request: async () => ++calls === 1 ? first.promise : second.promise,
+    onUpdate: (_id, snapshot) => updates.push(snapshot.storage_job.state),
+  });
+  const a = controller.read(cold);
+  const b = controller.read(cold);
+  first.resolve(status("cold", "completed", 100));
+  await a;
+  second.resolve(status("archiving", "queued", 0));
+  await b;
+  assert.deepEqual(updates, ["completed"]);
 });
