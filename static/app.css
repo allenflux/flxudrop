@@ -44,9 +44,7 @@ tbody tr.is-deleting { opacity: .65; background: #f4f7fc; }
 tbody tr.is-deleted { opacity: .6; background: #f6f6f6; }
 .is-deleted .file-info strong { text-decoration: line-through; text-decoration-thickness: 1px; }
 @media (prefers-reduced-motion: reduce) { tbody tr { transition: none; } }
-.file-list-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-top: 18px; font-size: .8125rem; }
-.file-list-footer .button { min-height: 32px; padding: 5px 10px; font-size: .8125rem; }
-.file-list-sentinel { height: 1px; }
+.pagination { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 18px; font-size: .875rem; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; text-align: left; }
 th, td { padding: 12px 8px; border-bottom: 1px solid #e5e5e5; vertical-align: middle; font-size: .875rem; }
 th { font-weight: 500; color: #666; }
@@ -167,7 +165,6 @@ textarea { display: block; width: 100%; min-height: 158px; resize: vertical; pad
   .storage-progress { max-width: 220px; }
   .storage-task-actions .button { min-height: 40px; }
   .button.set-cold { min-height: 40px; padding: 8px 4px; }
-  .file-list-footer .button { min-height: 40px; }
   .batch-actions { flex-wrap: wrap; }
   .button { min-height: 40px; }
   .row-actions { grid-template-columns: repeat(4, 44px); }

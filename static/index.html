@@ -86,7 +86,7 @@
       <p id="summary" class="muted">查看和管理已上传的文件</p>
       <p id="storage-config" class="field-help" role="status" hidden></p>
       <div id="selection-bar" class="selection-bar" hidden>
-        <label class="select-all-label"><input id="select-all" type="checkbox"><span data-i18n="selectPage">全选已加载</span></label>
+        <label class="select-all-label"><input id="select-all" type="checkbox"><span data-i18n="selectPage">全选本页</span></label>
         <span id="selection-count" class="muted" aria-live="polite">已选 0 个</span>
         <div class="batch-actions">
           <a id="bulk-download" class="button" href="#" target="download-frame" aria-disabled="true" data-i18n="bulkDownload">批量下载</a>
@@ -112,11 +112,11 @@
           <tbody id="file-list"></tbody>
         </table>
       </div>
-      <div id="file-list-footer" class="file-list-footer" role="group" aria-label="更多文件" hidden>
-        <span id="file-list-count" class="muted" aria-live="polite" aria-atomic="true"></span>
-        <button id="load-more" class="button" type="button" data-i18n="loadMore">加载更多</button>
-      </div>
-      <div id="file-list-sentinel" class="file-list-sentinel" aria-hidden="true" hidden></div>
+      <nav id="pagination" class="pagination" aria-label="文件分页" hidden>
+        <button id="previous-page" class="button" data-i18n="previous">上一页</button>
+        <span id="page-info" class="muted" aria-live="polite"></span>
+        <button id="next-page" class="button" data-i18n="next">下一页</button>
+      </nav>
       <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
       <p id="removed-hint" class="muted" hidden></p>
     </section>

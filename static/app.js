@@ -1,4 +1,4 @@
-import { PAGE_SIZE, MAX_DOWNLOAD_FILES, reconcileSelection, bulkDownloadUrl, deleteBatch } from "/static/file-actions.mjs";
+import { PAGE_SIZE, MAX_DOWNLOAD_FILES, pageFiles, reconcileSelection, bulkDownloadUrl, deleteBatch } from "/static/file-actions.mjs";
 import { translate } from "/static/i18n.mjs";
 import { setupUploads, copyText } from "/static/browser-upload.mjs";
 import { setupPreview, localFileUrl } from "/static/file-preview.mjs";
@@ -16,10 +16,7 @@ let token = "";
 let authRequired = false;
 let files = [];
 let selectedIds = new Set();
-let visibleCount = PAGE_SIZE;
-let loadingMore = false;
-let listObserver = null;
-let listObserverGeneration = 0;
+let page = 1;
 let loaded = false;
 let loading = false;
 let revision = 0;
@@ -55,7 +52,7 @@ const uploads = setupUploads({
   getToken: () => token,
   canUpload: () => loaded && !deleting && !(authRequired && !token),
   onAuthRequired: () => { lock(); showNotice("invalidToken", {}, true); $("token").focus(); },
-  onUploaded: async () => { await refreshFiles(false, { resetVisible: true }); },
+  onUploaded: async () => { page = 1; await refreshFiles(); },
   onBusyChange: () => { updateControls(); for (const file of files) updateRow(file); },
 });
 
@@ -235,8 +232,8 @@ function updateUploadExample() {
 
 function updateControls() {
   const busy = deleting || uploads.isBusy();
-  const shown = Math.min(visibleCount, files.length);
-  const selectable = files.slice(0, shown).filter((file) => !isRemoved(file.file_id));
+  const view = pageFiles(files, page);
+  const selectable = view.items.filter((file) => !isRemoved(file.file_id));
   const checked = selectable.filter((file) => selectedIds.has(file.file_id)).length;
   $("select-all").checked = selectable.length > 0 && checked === selectable.length;
   $("select-all").indeterminate = checked > 0 && checked < selectable.length;
@@ -252,15 +249,10 @@ function updateControls() {
   $("storage-config").textContent = storageError ? t("storageConfigError", { detail: storageError }) : t("storageDisabled");
   $("cancel-download-wait").hidden = !preparingDownload;
   $("selection-bar").hidden = !loaded;
-  $("file-list-footer").hidden = !loaded || !files.length;
-  const countLabel = t("filesShown", { shown, total: files.length });
-  if ($("file-list-count").textContent !== countLabel) $("file-list-count").textContent = countLabel;
-  $("load-more").hidden = shown >= files.length;
-  // Appending is synchronous; avoid blurring the keyboard fallback mid-append.
-  $("load-more").disabled = !loaded || loading || busy || shown >= files.length;
-  $("load-more").textContent = t(loadingMore ? "loading" : "loadMore");
-  $("file-list-sentinel").hidden = !loaded || shown >= files.length;
-  $("file-list").setAttribute("aria-busy", String(loading || loadingMore));
+  $("pagination").hidden = !loaded || view.pages <= 1;
+  $("page-info").textContent = t("pageInfo", { page: view.page, pages: view.pages, size: PAGE_SIZE });
+  $("previous-page").disabled = deleting || view.page <= 1;
+  $("next-page").disabled = deleting || view.page >= view.pages;
   $("refresh").textContent = t(loading ? "loading" : "refresh");
   $("refresh").disabled = loading || deleting || (authRequired && !token);
   $("unlock").disabled = loading;
@@ -271,44 +263,6 @@ function updateControls() {
   $("removed-hint").hidden = removed === 0;
   $("removed-hint").textContent = t("removedHint", { count: removed });
   uploads.render();
-  syncListObserver();
-}
-
-function canLoadMore() {
-  return loaded && !loading && !loadingMore && !deleting && !uploads.isBusy() && visibleCount < files.length;
-}
-
-function stopListObserver() {
-  listObserverGeneration++;
-  listObserver?.disconnect();
-  listObserver = null;
-}
-
-function syncListObserver() {
-  if (!canLoadMore() || typeof IntersectionObserver !== "function") { stopListObserver(); return; }
-  if (listObserver) return;
-  const generation = listObserverGeneration;
-  const sentinel = $("file-list-sentinel");
-  const observer = new IntersectionObserver((entries) => {
-    if (listObserver !== observer || generation !== listObserverGeneration) return;
-    if (entries.some((entry) => entry.target === sentinel && entry.isIntersecting)) loadMoreFiles();
-  }, { rootMargin: "320px 0px", threshold: 0 });
-  listObserver = observer;
-  observer.observe(sentinel);
-}
-
-function loadMoreFiles() {
-  if (!canLoadMore()) return;
-  loadingMore = true;
-  stopListObserver();
-  updateControls();
-  try {
-    visibleCount = Math.min(files.length, visibleCount + PAGE_SIZE);
-    renderFiles();
-  } finally {
-    loadingMore = false;
-    updateControls();
-  }
 }
 
 function updateRow(file) {
@@ -425,9 +379,6 @@ function updateStorageProgress(file, controls, { active, submitting, percent, la
 
 function lock() {
   revision++;
-  stopListObserver();
-  visibleCount = PAGE_SIZE;
-  loadingMore = false;
   storageSession++;
   storage.abortAll();
   downloadController?.abort();
@@ -484,41 +435,14 @@ function decorateRowAction(control, icon, label) {
   control.append(tooltip);
 }
 
-function updateRowLanguage(file, controls, dateFormat) {
-  const isDirectory = file.kind === "directory";
-  controls.checkbox.setAttribute("aria-label", t("selectFile", { name: file.filename }));
-  if (controls.folderBadge) controls.folderBadge.textContent = t("folderCount", { count: file.file_count ?? 0 });
-  controls.size.textContent = isDirectory ? t("folderZipSize", { size: formatSize(file.size) }) : formatSize(file.size);
-  controls.time.textContent = dateFormat.format(new Date(file.created_at * 1000));
-  controls.actions.setAttribute("aria-label", t("actions"));
-  decorateRowAction(controls.preview, isDirectory ? "folder" : "preview", t(isDirectory ? "openDirectory" : "preview"));
-  controls.preview.setAttribute("aria-label", t(isDirectory ? "openDirectoryNamed" : "previewFile", { name: file.filename }));
-  decorateRowAction(controls.download, "download", t(isDirectory ? "downloadZip" : "download"));
-  controls.download.setAttribute("aria-label", isDirectory ? `${t("downloadDirectory")} · ${file.filename}` : t("downloadFile", { name: file.filename }));
-  decorateRowAction(controls.copy, "copy", t("uploadCopy"));
-  controls.copy.setAttribute("aria-label", `${t("copyLink")} · ${file.filename}`);
-  decorateRowAction(controls.remove, "remove", t("remove"));
-  controls.remove.setAttribute("aria-label", t("deleteFile", { name: file.filename }));
-  controls.cold.setAttribute("aria-label", t("setColdNamed", { name: file.filename }));
-  controls.storageCancel.textContent = t("cancelStorage");
-  controls.storageRetry.textContent = t("retryStorage");
-  updateRow(file);
-}
-
-function renderFiles({ reset = false, updateExisting = false } = {}) {
+function renderFiles() {
+  const view = pageFiles(files, page);
+  page = view.page;
   const fragment = document.createDocumentFragment();
-  if (reset) {
-    for (const controls of visibleRows.values()) clearStorageAnimation(controls);
-    visibleRows.clear();
-    $("file-list").replaceChildren();
-  }
+  for (const controls of visibleRows.values()) clearStorageAnimation(controls);
+  visibleRows.clear();
   const dateFormat = new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" });
-  for (const file of files.slice(0, visibleCount)) {
-    const existing = visibleRows.get(file.file_id);
-    if (existing) {
-      if (updateExisting) updateRowLanguage(file, existing, dateFormat);
-      continue;
-    }
+  for (const file of view.items) {
     const isDirectory = file.kind === "directory";
     const row = document.createElement("tr");
     const nameCell = document.createElement("td");
@@ -542,13 +466,11 @@ function renderFiles({ reset = false, updateExisting = false } = {}) {
     id.title = file.file_id;
     id.setAttribute("role", "status");
     info.append(title);
-    let folderBadge = null;
     if (isDirectory) {
       const badge = document.createElement("span");
       badge.className = "folder-badge";
       badge.textContent = t("folderCount", { count: file.file_count ?? 0 });
       info.append(badge);
-      folderBadge = badge;
     }
     info.append(id);
     name.append(checkbox, info);
@@ -644,11 +566,11 @@ function renderFiles({ reset = false, updateExisting = false } = {}) {
     actions.append(previewButton, download, copy, remove);
     actionsCell.append(actions);
     row.append(nameCell, size, created, storageCell, actionsCell);
-    visibleRows.set(file.file_id, { row, checkbox, status: id, folderBadge, size, time, actions, download, remove, preview: previewButton, copy, cold, coldLabel, storageStatus, storageProgress: storageProgressElement, storageProgressFill, storageVisual: { jobId: null, busy: false, active: false, completing: false, timer: null, version: 0 }, storageError: storageErrorElement, storageCancel, storageRetry });
+    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove, preview: previewButton, copy, cold, coldLabel, storageStatus, storageProgress: storageProgressElement, storageProgressFill, storageVisual: { jobId: null, busy: false, active: false, completing: false, timer: null, version: 0 }, storageError: storageErrorElement, storageCancel, storageRetry });
     updateRow(file);
     fragment.append(row);
   }
-  $("file-list").append(fragment);
+  $("file-list").replaceChildren(fragment);
   $("table-wrap").hidden = !loaded || !files.length;
   $("empty-state").hidden = !loaded || files.length !== 0;
   updateControls();
@@ -680,7 +602,7 @@ function openDeleteDialog(targets) {
   $("cancel-delete").focus({ preventScroll: true });
 }
 
-async function refreshFiles(initial = false, { resetVisible = false } = {}) {
+async function refreshFiles(initial = false) {
   if (deleting) return;
   const current = ++revision;
   loading = true;
@@ -691,7 +613,6 @@ async function refreshFiles(initial = false, { resetVisible = false } = {}) {
     const data = await api("/api/files");
     if (current !== revision) return;
     files = data.files;
-    visibleCount = Math.min(files.length, resetVisible ? PAGE_SIZE : Math.max(PAGE_SIZE, visibleCount));
     storageEnabled = data.storage_enabled === true;
     storageError = data.storage_error || null;
     storageErrors.clear();
@@ -701,7 +622,7 @@ async function refreshFiles(initial = false, { resetVisible = false } = {}) {
     $("auth-panel").hidden = true;
     $("logout").hidden = !authRequired;
     $("token").value = "";
-    renderFiles({ reset: true });
+    renderFiles();
     scheduleStoragePoll();
   } catch (error) {
     if (current !== revision) return;
@@ -719,7 +640,6 @@ async function refreshFiles(initial = false, { resetVisible = false } = {}) {
 }
 
 function applyLanguage() {
-  stopListObserver();
   document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
   $("language").setAttribute("aria-label", t("language"));
   for (const button of $("language").querySelectorAll("[data-language]")) {
@@ -727,7 +647,7 @@ function applyLanguage() {
   }
   for (const element of document.querySelectorAll("[data-i18n]")) element.textContent = t(element.dataset.i18n);
   for (const element of document.querySelectorAll("[data-i18n-placeholder]")) element.placeholder = t(element.dataset.i18nPlaceholder);
-  $("file-list-footer").setAttribute("aria-label", t("fileListMore"));
+  $("pagination").setAttribute("aria-label", t("pagination"));
   $("download-frame").title = t("downloadFrame");
   $("upload-feedback").setAttribute("aria-label", t("uploadResults"));
   $("upload-progress").setAttribute("aria-label", t("uploadProgressLabel"));
@@ -735,7 +655,7 @@ function applyLanguage() {
   if (noticeState) showNotice(noticeState.key, noticeState.values, noticeState.error);
   $("directory-command-manual").setAttribute("aria-label", t("allDirectoryCommands"));
   for (const [id, key] of directoryCommandNotices) $(id).textContent = t(key);
-  renderFiles({ updateExisting: true });
+  renderFiles();
   renderDeleteDialog();
   preview.render();
   directoryBrowser.render();
@@ -756,9 +676,10 @@ $("auth-form").addEventListener("submit", (event) => {
 });
 $("refresh").addEventListener("click", () => refreshFiles());
 $("logout").addEventListener("click", () => { lock(); showNotice(); $("token").focus(); });
-$("load-more").addEventListener("click", loadMoreFiles);
+$("previous-page").addEventListener("click", () => { page--; renderFiles(); });
+$("next-page").addEventListener("click", () => { page++; renderFiles(); });
 $("select-all").addEventListener("change", () => {
-  for (const file of files.slice(0, visibleCount)) {
+  for (const file of pageFiles(files, page).items) {
     if (isRemoved(file.file_id)) continue;
     if ($("select-all").checked) selectedIds.add(file.file_id);
     else selectedIds.delete(file.file_id);
