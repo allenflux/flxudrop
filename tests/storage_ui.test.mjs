@@ -53,7 +53,7 @@ const file = (storage_state = "hot", file_id = "file-id") => ({
   ...(storage_state ? { storage_state, storage_job: null } : {}),
 });
 
-async function harness(context, initial, responder = () => ({ ok: true }), { manualPoll = false } = {}) {
+async function harness(context, initial, responder = () => ({ ok: true }), { manualPoll = false, autoLoad = false } = {}) {
   const nodes = new Map();
   const $ = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   const document = new Element();
@@ -61,6 +61,9 @@ async function harness(context, initial, responder = () => ({ ok: true }), { man
   document.getElementById = $;
   document.createElement = (tag) => new Element(tag);
   document.createDocumentFragment = () => Object.assign(new Element(), { fragment: true });
+  const languageButtons = ["zh", "en"].map((language) => Object.assign(new Element("button"), { dataset: { language } }));
+  $("language").querySelectorAll = () => languageButtons;
+  const observers = [];
   const requests = [];
   const pollTimers = [];
   const completionTimers = [];
@@ -69,6 +72,11 @@ async function harness(context, initial, responder = () => ({ ok: true }), { man
   const globals = {
     document, navigator: { language: "zh-CN" }, localStorage: { getItem() { return null; }, setItem() {} },
     location: { href: "http://localhost/", origin: "http://localhost" },
+    IntersectionObserver: autoLoad ? class {
+      constructor(callback, options) { this.callback = callback; this.options = options; this.targets = new Set(); observers.push(this); }
+      observe(target) { this.targets.add(target); }
+      disconnect() { this.targets.clear(); }
+    } : undefined,
     fetch: async (path, options) => {
       requests.push({ path, ...options });
       const data = path === "/api/files" ? initial : await responder(path, options);
@@ -99,7 +107,7 @@ async function harness(context, initial, responder = () => ({ ok: true }), { man
   source += `\n// isolated UI fixture ${fixtureIndex++}\n`;
   await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
   await tick();
-  return { $, requests, rows: () => $("file-list").children, poll: async () => {
+  return { $, requests, languageButtons, observers, rows: () => $("file-list").children, poll: async () => {
     const timer = pollTimers.shift();
     assert.ok(timer && !timer.cancelled, "an active storage poll is scheduled");
     await timer.callback();
@@ -186,7 +194,7 @@ test("running phases show reported progress while retries show their reason and 
   assert.doesNotMatch(third.children[0].children[0].textContent, /0%/);
 });
 
-test("completed archive responses update a whole queue and remain correct across pagination", async (context) => {
+test("completed archive responses update a whole queue and remain correct when more rows appear", async (context) => {
   const files = Array.from({ length: 25 }, (_, index) => ({
     ...file("archiving", `file-${index}`),
     storage_job: { job_id: `archive-${index}`, state: "queued", kind: "archive", progress: 0, cancellable: true },
@@ -206,10 +214,148 @@ test("completed archive responses update a whole queue and remain correct across
   }
   ui.finishAnimations();
   for (const row of ui.rows()) assert.equal(row.children[3].children[1].hidden, true);
-  await ui.$("next-page").dispatch("click");
-  assert.equal(ui.rows().length, 5);
+  const firstRow = ui.rows()[0];
+  await ui.$("load-more").dispatch("click");
+  assert.equal(ui.rows().length, 25);
+  assert.equal(ui.rows()[0], firstRow);
   for (const row of ui.rows()) assert.equal(row.children[3].children[0].children[0].textContent, "冷文件");
+  for (const row of ui.rows()) assert.equal(row.children[3].children[1].hidden, true);
   assert.equal(ui.pendingPolls(), 0);
+});
+
+test("loading more keeps existing rows and selects only loaded items without another list request", async (context) => {
+  const files = Array.from({ length: 43 }, (_, index) => file("hot", `file-${index}`));
+  const ui = await harness(context, { ok: true, storage_enabled: true, files });
+  assert.equal(ui.rows().length, 20);
+  const firstRow = ui.rows()[0];
+  ui.$("select-all").checked = true;
+  await ui.$("select-all").dispatch("change");
+  assert.ok(ui.rows().every((row) => row.children[0].children[0].children[0].checked));
+  await ui.$("load-more").dispatch("click");
+  assert.equal(ui.rows().length, 40);
+  assert.equal(ui.rows()[0], firstRow);
+  assert.equal(ui.rows()[20].children[0].children[0].children[0].checked, false);
+  assert.equal(ui.$("select-all").checked, false);
+  assert.equal(ui.$("select-all").indeterminate, true);
+  assert.match(ui.$("selection-count").textContent, /20/);
+  ui.$("select-all").checked = true;
+  await ui.$("select-all").dispatch("change");
+  await ui.$("load-more").dispatch("click");
+  assert.equal(ui.rows().length, 43);
+  assert.equal(ui.rows()[42].children[0].children[0].children[0].checked, false);
+  assert.equal(ui.$("load-more").hidden, true);
+  assert.match(ui.$("file-list-count").textContent, /43/);
+  await ui.$("load-more").dispatch("click");
+  assert.equal(ui.rows().length, 43);
+  ui.$("select-all").checked = false;
+  await ui.$("select-all").dispatch("change");
+  assert.ok(ui.rows().every((row) => !row.children[0].children[0].children[0].checked));
+  assert.deepEqual(ui.requests.map((request) => request.path), ["/api/files"]);
+});
+
+test("bottom intersections append each batch once and stop after the final item", async (context) => {
+  const files = Array.from({ length: 43 }, (_, index) => file("hot", `file-${index}`));
+  const ui = await harness(context, { ok: true, storage_enabled: true, files }, undefined, { autoLoad: true });
+  const firstRow = ui.rows()[0];
+  const activeObserver = () => ui.observers.findLast((observer) => observer.targets.size);
+  const first = activeObserver();
+  assert.ok(first, "a bottom observer is attached");
+  const entry = { target: ui.$("file-list-sentinel"), isIntersecting: true };
+  first.callback([{ ...entry, isIntersecting: false }]);
+  assert.equal(ui.rows().length, 20);
+  first.callback([entry, entry]);
+  assert.equal(ui.rows().length, 40);
+  assert.equal(ui.rows()[0], firstRow);
+  first.callback([entry]);
+  assert.equal(ui.rows().length, 40, "a queued callback from the previous observer is ignored");
+  activeObserver().callback([entry]);
+  assert.equal(ui.rows().length, 43);
+  assert.equal(activeObserver(), undefined);
+  assert.equal(new Set(ui.rows().map((row) => row.children[0].children[0].children[1].children.at(-1).textContent)).size, 43);
+  assert.equal(ui.requests.length, 1);
+});
+
+test("appending and changing language preserve an existing row and its completion animation", async (context) => {
+  const files = Array.from({ length: 25 }, (_, index) => file("hot", `file-${index}`));
+  const ui = await harness(context, { ok: true, storage_enabled: true, files }, () => ({
+    ok: true, storage_state: "cold", storage_job: { job_id: "small-completed", state: "completed", kind: "archive", progress: 100, cancellable: false },
+  }), { manualPoll: true });
+  const row = ui.rows()[0];
+  await row.children[3].children[0].children[1].dispatch("click");
+  await tick();
+  const timer = ui.completionTimers[0];
+  assert.ok(timer && !timer.cancelled);
+  await ui.$("load-more").dispatch("click");
+  assert.equal(ui.rows().length, 25);
+  assert.equal(ui.rows()[0], row);
+  assert.equal(timer.cancelled, false);
+  await ui.languageButtons[1].dispatch("click");
+  assert.equal(ui.rows()[0], row);
+  assert.equal(row.children[3].children[0].children[0].textContent, "Cold");
+  assert.equal(row.children[3].children[1].hidden, false);
+  assert.equal(timer.cancelled, false);
+  ui.finishAnimations();
+  assert.equal(row.children[3].children[1].hidden, true);
+});
+
+test("refresh preserves the loaded range, clamps a shorter list, and invalidates old bottom callbacks", async (context) => {
+  const initial = { ok: true, storage_enabled: true, files: Array.from({ length: 65 }, (_, index) => file("hot", `file-${index}`)) };
+  const ui = await harness(context, initial, undefined, { autoLoad: true });
+  const activeObserver = () => ui.observers.findLast((observer) => observer.targets.size);
+  const entry = { target: ui.$("file-list-sentinel"), isIntersecting: true };
+  activeObserver().callback([entry]);
+  assert.equal(ui.rows().length, 40);
+  const beforeRefresh = activeObserver();
+  await ui.$("refresh").dispatch("click");
+  assert.equal(ui.rows().length, 40);
+  beforeRefresh.callback([entry]);
+  assert.equal(ui.rows().length, 40);
+  const beforeFailedRefresh = activeObserver();
+  initial.ok = false;
+  initial.httpStatus = 503;
+  await ui.$("refresh").dispatch("click");
+  assert.equal(ui.rows().length, 40);
+  assert.match(ui.$("file-list-count").textContent, /40/);
+  assert.ok(activeObserver(), "automatic loading resumes after a failed refresh");
+  beforeFailedRefresh.callback([entry]);
+  assert.equal(ui.rows().length, 40);
+  initial.ok = true;
+  delete initial.httpStatus;
+  const beforeShorterList = activeObserver();
+  initial.files = initial.files.slice(0, 10);
+  await ui.$("refresh").dispatch("click");
+  assert.equal(ui.rows().length, 10);
+  assert.equal(ui.$("load-more").hidden, true);
+  beforeShorterList.callback([entry]);
+  assert.equal(ui.rows().length, 10);
+  await ui.$("logout").dispatch("click");
+  beforeShorterList.callback([entry]);
+  assert.equal(ui.rows().length, 0);
+  assert.equal(ui.$("file-list-footer").hidden, true);
+});
+
+test("deleting pauses automatic loading and resumes without skipping retained deletion rows", async (context) => {
+  let completeDeletion;
+  const initial = { ok: true, storage_enabled: true, files: Array.from({ length: 45 }, (_, index) => file("hot", `file-${index}`)) };
+  const ui = await harness(context, initial, (path, options) => options.method === "DELETE" ? new Promise((resolve) => { completeDeletion = resolve; }) : { ok: true }, { autoLoad: true });
+  const activeObserver = () => ui.observers.findLast((observer) => observer.targets.size);
+  const staleObserver = activeObserver();
+  const entry = { target: ui.$("file-list-sentinel"), isIntersecting: true };
+  const firstRow = ui.rows()[0];
+  await firstRow.children[4].children[0].children[3].dispatch("click");
+  const deleting = ui.$("confirm-delete").dispatch("click");
+  await tick();
+  staleObserver.callback([entry]);
+  assert.equal(ui.rows().length, 20);
+  assert.equal(activeObserver(), undefined);
+  completeDeletion({ ok: true });
+  await deleting;
+  assert.ok(firstRow.classes.has("is-deleted"));
+  assert.ok(activeObserver());
+  activeObserver().callback([entry]);
+  assert.equal(ui.rows().length, 40);
+  assert.equal(ui.rows()[0], firstRow);
+  assert.equal(ui.rows()[20].children[0].children[0].children[1].children.at(-1).textContent, "file-20");
 });
 
 test("an immediate completed POST animates completion, while historical completed jobs stay hidden", async (context) => {
