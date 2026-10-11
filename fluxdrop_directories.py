@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from fluxdrop_multipart import read_multipart_files
+from fluxdrop_multipart import budgeted_writer, read_multipart_files
 
 
 MAX_DIRECTORY_ENTRIES = 10_000
@@ -198,9 +198,13 @@ def read_multipart_directory(
     content_length: int,
     content_type: str,
     max_bytes: int,
+    *,
+    reservation=None,
 ) -> DirectorySummary:
     index = _DirectoryIndex(max_bytes)
-    with zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_STORED) as archive:
+    with target_path.open("w+b") as raw_output, zipfile.ZipFile(
+        budgeted_writer(raw_output, reservation), "w", compression=zipfile.ZIP_STORED
+    ) as archive:
         def consume(name: str, stream: BinaryIO, size: int) -> None:
             directory = name.endswith("/")
             path = index.add(name, directory, size)
@@ -212,5 +216,6 @@ def read_multipart_directory(
         read_multipart_files(
             source, content_length, content_type, consume,
             temp_dir=target_path.parent, max_parts=MAX_DIRECTORY_ENTRIES,
+            reservation=reservation,
         )
     return index.summary()

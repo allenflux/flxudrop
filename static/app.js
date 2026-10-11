@@ -1,8 +1,9 @@
 import { PAGE_SIZE, MAX_DOWNLOAD_FILES, pageFiles, reconcileSelection, bulkDownloadUrl, deleteBatch } from "/static/file-actions.mjs";
 import { translate } from "/static/i18n.mjs";
 import { setupUploads, copyText } from "/static/browser-upload.mjs";
-import { setupPreview } from "/static/file-preview.mjs";
+import { setupPreview, localFileUrl } from "/static/file-preview.mjs";
 import { setupDirectoryBrowser } from "/static/directory-browser.mjs";
+import { createStorageController, hasStorage, isHot, activeStorageJob, storageProgress, storageFileId, restoreBatch } from "/static/file-storage.mjs";
 
 const $ = (id) => document.getElementById(id);
 let language = navigator.language?.toLowerCase().startsWith("zh") ? "zh" : "en";
@@ -24,15 +25,26 @@ let pendingDeletion = [];
 let deleteProgress = { done: 0, total: 0 };
 let deleteReport = null;
 let noticeState = null;
+let storageEnabled = false;
+let storageError = null;
+let storageSession = 0;
+let storageTimer = null;
+let storagePollingSession = null;
+let preparingDownload = false;
+let downloadController = null;
+const coldSubmitting = new Set();
+const storageErrors = new Map();
 const directoryCommandNotices = new Map();
 const fileStates = new Map();
 const visibleRows = new Map();
 const isRemoved = (id) => ["deleted", "missing"].includes(fileStates.get(id));
 const liveFiles = () => files.filter((file) => !isRemoved(file.file_id));
-const preview = setupPreview({ t, formatSize });
+const storage = createStorageController({ request: storageRequest, onUpdate: updateStorage });
+const preview = setupPreview({ t, formatSize, ensureAvailable, onDownload: downloadFile, storageErrorMessage });
 const directoryBrowser = setupDirectoryBrowser({
   t, formatSize, api,
   onPreview: (file) => preview.open(file),
+  onDownload: downloadFile,
   onAuthRequired: () => { lock(); showNotice("invalidToken", {}, true); $("token").focus(); },
 });
 const uploads = setupUploads({
@@ -60,8 +72,11 @@ function formatSize(bytes) {
   return `${new Intl.NumberFormat(language, { maximumFractionDigits: 1 }).format(value)} ${units[unit]}`;
 }
 
-async function api(path, method = "GET") {
+async function api(path, method = "GET", { signal } = {}) {
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const headers = token ? { "X-Upload-Token": token } : {};
@@ -70,10 +85,140 @@ async function api(path, method = "GET") {
     if (!response.ok || !data.ok) {
       const error = new Error(data.error || t("requestError"));
       error.status = response.status;
+      error.code = data.error_code;
       throw error;
     }
     return data;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
+}
+
+function storageErrorMessage(error) {
+  if (error.status === 507 || ["storage_capacity", "insufficient_storage", "disk_full", "capacity"].includes(error.code)) return t("storageCapacity");
+  if (error.status === 409 && !["storage_configuration", "storage_disabled"].includes(error.code)) return t("storageCancelLate");
+  if (error.code === "restore_timeout") return t("storageWaitTimeout");
+  return t("storageOperationError", { detail: error.message || t("uploadNetworkError") });
+}
+
+async function storageRequest(...args) {
+  const session = storageSession;
+  const snapshot = await api(...args);
+  if (session !== storageSession) throw new DOMException("Aborted", "AbortError");
+  return snapshot;
+}
+
+function updateStorage(id, snapshot) {
+  const file = files.find((item) => item.file_id === id);
+  if (!file || isRemoved(id)) return;
+  storageErrors.delete(id);
+  for (const key of ["storage_state", "storage_job", "last_access_at", "last_content_access_at", "content_modified_at", "remote_verified"]) {
+    if (Object.hasOwn(snapshot, key)) file[key] = snapshot[key];
+  }
+  updateRow(file);
+  updateControls();
+  scheduleStoragePoll();
+}
+
+function scheduleStoragePoll() {
+  if (storageTimer !== null || storagePollingSession === storageSession || !loaded) return;
+  const targets = liveFiles().filter((file) => activeStorageJob(file) || ["archiving", "evicting", "restoring"].includes(file.storage_state));
+  if (!targets.length) return;
+  const session = storageSession;
+  storageTimer = setTimeout(async () => {
+    storageTimer = null;
+    storagePollingSession = session;
+    try {
+      for (const file of targets) {
+        if (session !== storageSession) return;
+        if (isRemoved(file.file_id)) continue;
+        try { await storage.read(file); }
+        catch (error) {
+          if (session !== storageSession) return;
+          storageErrors.set(file.file_id, error);
+          updateRow(file);
+        }
+      }
+    } finally {
+      if (storagePollingSession === session) storagePollingSession = null;
+      if (session === storageSession) scheduleStoragePoll();
+    }
+  }, 1500);
+}
+
+async function ensureAvailable(file, options = {}) {
+  const parent = files.find((item) => item.file_id === storageFileId(file));
+  // Child URLs keep their path while adopting the parent's latest storage state.
+  const current = parent ? { ...file, storage_state: parent.storage_state, storage_job: parent.storage_job } : file;
+  return storage.ensureHot(current, options);
+}
+
+function startDownload(url) { $("download-frame").src = url; }
+
+async function downloadFile(file, event) {
+  if (event && (isRemoved(storageFileId(file)) || !localFileUrl(file.download_url, "/f/"))) { event.preventDefault(); return; }
+  if (!hasStorage(file)) return;
+  event?.preventDefault();
+  const session = storageSession;
+  showNotice("storagePreparing", { name: file.filename });
+  try {
+    await ensureAvailable(file, { onProgress: (snapshot) => {
+      if (session === storageSession && !isHot(snapshot)) showNotice("storageRestoringNamed", { name: file.filename, percent: storageProgress(snapshot.storage_job) ?? 0 });
+    } });
+    if (session !== storageSession || isRemoved(storageFileId(file))) return;
+    const url = localFileUrl(file.download_url, "/f/");
+    if (url) { startDownload(url); showNotice(); }
+  } catch (error) {
+    if (session === storageSession && error.name !== "AbortError") showNotice("storageMessage", { detail: storageErrorMessage(error) }, true);
+  }
+}
+
+async function setCold(file) {
+  if (!storageEnabled || coldSubmitting.has(file.file_id) || isRemoved(file.file_id) || !isHot(file) || activeStorageJob(file)) return false;
+  const session = storageSession;
+  coldSubmitting.add(file.file_id);
+  storageErrors.delete(file.file_id);
+  updateRow(file);
+  updateControls();
+  try {
+    const snapshot = await storage.setCold(file);
+    if (session !== storageSession) return false;
+    // A minimal 202 response may carry only job_id until the first status read.
+    if (!snapshot.storage_job && snapshot.job_id && !["cold"].includes(snapshot.storage_state)) {
+      file.storage_job = { job_id: snapshot.job_id, kind: "archive", state: "queued", progress: 0, error: null, cancellable: true };
+    }
+    updateRow(file);
+    scheduleStoragePoll();
+    return true;
+  } catch (error) {
+    if (session !== storageSession) return false;
+    if (error.status === 401) { lock(); showNotice("invalidToken", {}, true); return false; }
+    storageErrors.set(file.file_id, error);
+    updateRow(file);
+    return false;
+  } finally {
+    if (session === storageSession) {
+      coldSubmitting.delete(file.file_id);
+      updateRow(file);
+      updateControls();
+    }
+  }
+}
+
+async function cancelStorage(file) {
+  try { await storage.cancel(file); storageErrors.delete(file.file_id); updateRow(file); }
+  catch (error) {
+    if (error.status === 401) { lock(); showNotice("invalidToken", {}, true); return; }
+    storageErrors.set(file.file_id, error);
+    updateRow(file);
+  }
+}
+
+async function retryStorage(file) {
+  storageErrors.delete(file.file_id);
+  if (file.storage_job?.kind === "restore" || ["cold", "restoring"].includes(file.storage_state)) {
+    const session = storageSession;
+    try { await ensureAvailable(file); }
+    catch (error) { if (session === storageSession) { storageErrors.set(file.file_id, error); updateRow(file); } }
+  } else await setCold(file);
 }
 
 function updateUploadExample() {
@@ -92,10 +237,15 @@ function updateControls() {
   $("select-all").indeterminate = checked > 0 && checked < selectable.length;
   $("select-all").disabled = busy || !selectable.length;
   $("selection-count").textContent = t(selectedIds.size > MAX_DOWNLOAD_FILES ? "downloadLimit" : "selected", { count: selectedIds.size, limit: MAX_DOWNLOAD_FILES });
-  const canDownload = selectedIds.size > 0 && selectedIds.size <= MAX_DOWNLOAD_FILES && !deleting;
+  const canDownload = selectedIds.size > 0 && selectedIds.size <= MAX_DOWNLOAD_FILES && !deleting && !preparingDownload;
   $("bulk-download").setAttribute("aria-disabled", String(!canDownload));
   $("bulk-download").href = canDownload ? bulkDownloadUrl([...selectedIds]) : "#";
   $("bulk-delete").disabled = busy || !selectedIds.size;
+  $("bulk-cold").disabled = busy || !storageEnabled || !liveFiles().some((file) => selectedIds.has(file.file_id) && isHot(file) && !activeStorageJob(file) && !coldSubmitting.has(file.file_id));
+  $("bulk-cold").title = storageEnabled ? t("setCold") : t("storageDisabled");
+  $("storage-config").hidden = !loaded || storageEnabled;
+  $("storage-config").textContent = storageError ? t("storageConfigError", { detail: storageError }) : t("storageDisabled");
+  $("cancel-download-wait").hidden = !preparingDownload;
   $("selection-bar").hidden = !loaded;
   $("pagination").hidden = !loaded || view.pages <= 1;
   $("page-info").textContent = t("pageInfo", { page: view.page, pages: view.pages, size: PAGE_SIZE });
@@ -129,10 +279,50 @@ function updateRow(file) {
   controls.download.tabIndex = removed ? -1 : 0;
   controls.status.classList.toggle("file-status", Boolean(state));
   controls.status.textContent = state ? t(`${state}Status`) : file.file_id;
+  updateStorageRow(file, controls, removed);
+}
+
+function updateStorageRow(file, controls, removed) {
+  const job = file.storage_job;
+  const active = activeStorageJob(file);
+  const current = file.storage_state || "hot";
+  const submitting = coldSubmitting.has(file.file_id);
+  const error = storageErrors.get(file.file_id) || (job?.state === "failed" ? Object.assign(new Error(job.error || t("requestError")), { code: job.error_code }) : null);
+  const labelKey = { hot: "storageHot", hot_backed: "storageHotBacked", archiving: "storageArchiving", evicting: "storageEvicting", cold: "storageCold", restoring: "storageRestoring" }[current] || "storageHot";
+  let label = t(labelKey);
+  if (submitting || (active && job.state === "queued")) label = t(job?.kind === "restore" ? "storageRestoreQueued" : "storageArchiveQueued");
+  else if (active && job.state === "retry") label = t("storageRetrying");
+  if (active && storageProgress(job) !== null) label += ` · ${storageProgress(job)}%`;
+  controls.storageStatus.textContent = label;
+  controls.storageProgress.hidden = !active;
+  if (active) {
+    const percent = storageProgress(job);
+    if (percent === null) controls.storageProgress.removeAttribute("value");
+    else controls.storageProgress.value = percent;
+    controls.storageProgress.setAttribute("aria-label", label);
+  }
+  controls.storageError.hidden = !error || removed;
+  controls.storageError.textContent = error ? storageErrorMessage(error) : "";
+  controls.storageRetry.hidden = !error || active || removed;
+  controls.storageRetry.disabled = deleting || (!storageEnabled && isHot(file));
+  controls.storageCancel.hidden = !active || !job.cancellable || removed;
+  controls.storageCancel.disabled = deleting;
+  controls.cold.textContent = t(current === "cold" ? "alreadyCold" : "setCold");
+  controls.cold.disabled = removed || deleting || uploads.isBusy() || !storageEnabled || submitting || active || !isHot(file);
+  controls.cold.title = storageEnabled ? t("setColdNamed", { name: file.filename }) : t("storageDisabled");
 }
 
 function lock() {
   revision++;
+  storageSession++;
+  storage.abortAll();
+  downloadController?.abort();
+  downloadController = null;
+  preparingDownload = false;
+  if (storageTimer !== null) clearTimeout(storageTimer);
+  storageTimer = null;
+  storageErrors.clear();
+  coldSubmitting.clear();
   preview.close();
   directoryBrowser.close();
   $("link-dialog").close();
@@ -227,6 +417,31 @@ function renderFiles() {
     time.dateTime = date.toISOString();
     time.textContent = dateFormat.format(date);
     created.append(time);
+    const storageCell = document.createElement("td");
+    storageCell.className = "storage-cell";
+    const storageStatus = document.createElement("span");
+    storageStatus.className = "storage-status";
+    storageStatus.setAttribute("role", "status");
+    const storageProgressElement = document.createElement("progress");
+    storageProgressElement.className = "storage-progress";
+    storageProgressElement.max = 100;
+    storageProgressElement.hidden = true;
+    const storageErrorElement = document.createElement("span");
+    storageErrorElement.className = "storage-error field-help";
+    const storageTaskActions = document.createElement("div");
+    storageTaskActions.className = "storage-task-actions";
+    const storageCancel = document.createElement("button");
+    storageCancel.className = "button";
+    storageCancel.type = "button";
+    storageCancel.textContent = t("cancelStorage");
+    storageCancel.addEventListener("click", () => void cancelStorage(file));
+    const storageRetry = document.createElement("button");
+    storageRetry.className = "button";
+    storageRetry.type = "button";
+    storageRetry.textContent = t("retryStorage");
+    storageRetry.addEventListener("click", () => void retryStorage(file));
+    storageTaskActions.append(storageCancel, storageRetry);
+    storageCell.append(storageStatus, storageProgressElement, storageErrorElement, storageTaskActions);
     const actionsCell = document.createElement("td");
     const actions = document.createElement("div");
     actions.className = "file-actions row-actions";
@@ -257,15 +472,21 @@ function renderFiles() {
     download.href = file.download_url;
     download.download = file.download_filename || file.filename;
     download.setAttribute("aria-label", isDirectory ? `${t("downloadDirectory")} · ${file.filename}` : t("downloadFile", { name: file.filename }));
-    download.addEventListener("click", (event) => { if (isRemoved(file.file_id)) event.preventDefault(); });
+    download.addEventListener("click", (event) => void downloadFile(file, event));
     const remove = document.createElement("button");
     decorateRowAction(remove, "remove", t("remove"));
     remove.setAttribute("aria-label", t("deleteFile", { name: file.filename }));
     remove.addEventListener("click", () => openDeleteDialog([file]));
-    actions.append(previewButton, download, copy, remove);
+    const cold = document.createElement("button");
+    cold.type = "button";
+    cold.className = "button set-cold";
+    cold.textContent = t("setCold");
+    cold.setAttribute("aria-label", t("setColdNamed", { name: file.filename }));
+    cold.addEventListener("click", () => void setCold(file));
+    actions.append(previewButton, download, copy, remove, cold);
     actionsCell.append(actions);
-    row.append(nameCell, size, created, actionsCell);
-    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove, preview: previewButton, copy });
+    row.append(nameCell, size, created, storageCell, actionsCell);
+    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove, preview: previewButton, copy, cold, storageStatus, storageProgress: storageProgressElement, storageError: storageErrorElement, storageCancel, storageRetry });
     updateRow(file);
     fragment.append(row);
   }
@@ -312,6 +533,9 @@ async function refreshFiles(initial = false) {
     const data = await api("/api/files");
     if (current !== revision) return;
     files = data.files;
+    storageEnabled = data.storage_enabled === true;
+    storageError = data.storage_error || null;
+    storageErrors.clear();
     fileStates.clear();
     selectedIds = reconcileSelection(selectedIds, files);
     loaded = true;
@@ -319,6 +543,7 @@ async function refreshFiles(initial = false) {
     $("logout").hidden = !authRequired;
     $("token").value = "";
     renderFiles();
+    scheduleStoragePoll();
   } catch (error) {
     if (current !== revision) return;
     if (error.status === 401) {
@@ -383,14 +608,54 @@ $("select-all").addEventListener("change", () => {
   updateControls();
 });
 $("bulk-delete").addEventListener("click", () => openDeleteDialog(liveFiles().filter((file) => selectedIds.has(file.file_id))));
-$("bulk-download").addEventListener("click", (event) => {
-  if ($("bulk-download").getAttribute("aria-disabled") === "true") event.preventDefault();
-  else showNotice("downloadStarted", { count: selectedIds.size });
+$("bulk-cold").addEventListener("click", async () => {
+  if ($("bulk-cold").disabled) return;
+  const session = storageSession;
+  const targets = liveFiles().filter((file) => selectedIds.has(file.file_id) && isHot(file) && !activeStorageJob(file));
+  let accepted = 0;
+  let failed = 0;
+  for (const file of targets) {
+    if (session !== storageSession) return;
+    if (await setCold(file)) accepted++;
+    else failed++;
+    if (session === storageSession) showNotice("storageBatchResult", { accepted, failed, total: targets.length }, failed > 0);
+  }
 });
+$("bulk-download").addEventListener("click", async (event) => {
+  if ($("bulk-download").getAttribute("aria-disabled") === "true") { event.preventDefault(); return; }
+  const targets = liveFiles().filter((file) => selectedIds.has(file.file_id));
+  if (!targets.some(hasStorage)) { showNotice("downloadStarted", { count: targets.length }); return; }
+  event.preventDefault();
+  const session = storageSession;
+  const controller = new AbortController();
+  downloadController = controller;
+  preparingDownload = true;
+  updateControls();
+  try {
+    await restoreBatch(targets, ensureAvailable, (done, total, file) => {
+      if (session === storageSession) showNotice("storageBatchRestoring", { done, total, name: file?.filename || "" });
+    }, controller.signal);
+    if (session !== storageSession) return;
+    startDownload(bulkDownloadUrl(targets.map((file) => file.file_id)));
+    showNotice("downloadStarted", { count: targets.length });
+  } catch (error) {
+    if (session === storageSession) showNotice(error.name === "AbortError" ? "storageWaitCancelled" : "storageMessage", { detail: storageErrorMessage(error) }, error.name !== "AbortError");
+  } finally {
+    if (downloadController === controller) { downloadController = null; preparingDownload = false; updateControls(); }
+  }
+});
+$("cancel-download-wait").addEventListener("click", () => downloadController?.abort());
 $("download-frame").addEventListener("load", () => {
   try {
     const text = $("download-frame").contentDocument?.body?.textContent;
-    if (text && JSON.parse(text).ok === false) showNotice("downloadError", {}, true);
+    if (text) {
+      const data = JSON.parse(text);
+      if (data.ok === false) {
+        if (data.error_code === "storage_capacity") showNotice("storageCapacity", {}, true);
+        else if (data.error_code) showNotice("storageMessage", { detail: storageErrorMessage(Object.assign(new Error(data.error), { code: data.error_code })) }, true);
+        else showNotice("downloadError", {}, true);
+      }
+    }
   } catch { /* ZIP responses are handled by the browser's download manager. */ }
 });
 $("cancel-delete").addEventListener("click", () => $("delete-dialog").close());

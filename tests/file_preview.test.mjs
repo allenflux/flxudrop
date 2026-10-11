@@ -58,12 +58,13 @@ function fixture(kind = "text", id = "first") {
   };
 }
 
-function harness(testContext, responder = () => response()) {
+function harness(testContext, responder = () => response(), options = {}) {
   const nodes = new Map([
     ["preview-dialog", new Element("dialog")], ["preview-title", new Element("h2")],
     ["preview-meta", new Element("p")], ["preview-content", new Element()],
     ["preview-status", new Element("p")], ["preview-download", new Element("a")],
     ["close-preview", new Element("button")],
+    ["preview-retry", new Element("button")],
   ]);
   let language = "en";
   const requests = [];
@@ -77,6 +78,7 @@ function harness(testContext, responder = () => response()) {
   const preview = setupPreview({
     t: (key, values) => `${language}:${key}${values?.name ? `:${values.name}` : ""}`,
     formatSize: (size) => `${size} B`,
+    ...options,
   });
   testContext.after(() => {
     preview.close();
@@ -202,4 +204,59 @@ test("transport failures show a recoverable error and closing by Escape clears c
   ui.nodes.get("preview-dialog").fire("cancel", { preventDefault() { prevented = true; } });
   assert.equal(prevented, true);
   assert.equal(ui.nodes.get("preview-dialog").open, false);
+});
+
+test("cold media waits for restoration before its HEAD request or source assignment", async (t) => {
+  const restoring = deferred();
+  const attempts = [];
+  const ui = harness(t, () => response(), { ensureAvailable: async (file, options) => {
+    attempts.push({ file, options });
+    options.onProgress({ storage_state: "restoring", storage_job: { progress: 35 } });
+    await restoring.promise;
+  } });
+  const opening = ui.preview.open({ ...fixture("video"), file_id: "first", storage_state: "cold" });
+  assert.equal(ui.requests.length, 0);
+  assert.deepEqual(ui.nodes.get("preview-content").children, []);
+  assert.equal(attempts[0].options.preview, true);
+  assert.match(ui.nodes.get("preview-status").textContent, /storageRestoreProgress/);
+  restoring.resolve();
+  await opening;
+  assert.equal(ui.requests[0].method, "HEAD");
+  assert.equal(ui.nodes.get("preview-content").children[0].src, "/p/first/first.txt");
+});
+
+test("closing while restoring aborts this waiter and never loads stale content", async (t) => {
+  const restoring = deferred();
+  let signal;
+  const ui = harness(t, () => response(), { ensureAvailable: async (_file, options) => { signal = options.signal; await restoring.promise; } });
+  const opening = ui.preview.open({ ...fixture("pdf"), storage_state: "cold" });
+  ui.preview.close();
+  assert.equal(signal.aborted, true);
+  restoring.resolve();
+  await opening;
+  assert.equal(ui.requests.length, 0);
+  assert.deepEqual(ui.nodes.get("preview-content").children, []);
+});
+
+test("unsupported or unsafe previews do not ask storage to restore the file", async (t) => {
+  let restored = 0;
+  const ui = harness(t, () => response(), { ensureAvailable: async () => { restored++; } });
+  await ui.preview.open({ ...fixture("unsupported"), storage_state: "cold" });
+  await ui.preview.open({ ...fixture("pdf"), preview_url: "https://other.test/p/id/file", storage_state: "cold" });
+  assert.equal(restored, 0);
+  assert.equal(ui.requests.length, 0);
+});
+
+test("failed cold restoration exposes a retry button without fetching or embedding an error", async (t) => {
+  const ui = harness(t, () => response(), {
+    ensureAvailable: async () => { throw Object.assign(new Error("Not enough space; download in batches"), { status: 507 }); },
+    storageErrorMessage: (error) => error.message,
+  });
+  await ui.preview.open({ ...fixture("image"), storage_state: "cold" });
+  assert.equal(ui.requests.length, 0);
+  assert.equal(ui.nodes.get("preview-retry").hidden, false);
+  assert.match(ui.nodes.get("preview-status").textContent, /download in batches/);
+  assert.deepEqual(ui.nodes.get("preview-content").children, []);
+  ui.preview.close();
+  assert.equal(ui.nodes.get("preview-retry").hidden, true);
 });

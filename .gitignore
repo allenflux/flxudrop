@@ -6,3 +6,7 @@ __pycache__/
 data/
 .coverage
 htmlcov/
+.env
+.env.*
+!.env.example
+secrets/

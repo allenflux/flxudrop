@@ -9,7 +9,7 @@ export function localFileUrl(value, prefix) {
   } catch { return null; }
 }
 
-export function setupPreview({ t, formatSize }) {
+export function setupPreview({ t, formatSize, ensureAvailable, onDownload, storageErrorMessage = (error) => error.message }) {
   const $ = (id) => document.getElementById(id);
   const dialog = $("preview-dialog");
   const content = $("preview-content");
@@ -17,6 +17,8 @@ export function setupPreview({ t, formatSize }) {
   const download = $("preview-download");
   let current = null;
   let statusKey = "";
+  let statusDetail = "";
+  let retryAvailable = false;
   let revision = 0;
   let controller = null;
   let activeTimer = null;
@@ -30,14 +32,16 @@ export function setupPreview({ t, formatSize }) {
     $("close-preview").setAttribute("aria-label", t("closePreview"));
     download.textContent = t("download");
     download.setAttribute("aria-label", t("downloadFile", { name: current.filename }));
-    status.textContent = statusKey ? t(statusKey) : "";
-    status.hidden = !statusKey;
-    status.classList.toggle("error", ["previewError", "previewMissing"].includes(statusKey));
+    status.textContent = statusDetail || (statusKey ? t(statusKey) : "");
+    status.hidden = !statusKey && !statusDetail;
+    status.classList.toggle("error", ["previewError", "previewMissing", "storageFailed"].includes(statusKey));
+    if ($("preview-retry")) { $("preview-retry").hidden = !retryAvailable; $("preview-retry").textContent = t("retryStorage"); }
     if (media?.tagName === "IFRAME") media.title = t("previewFile", { name: current.filename });
   }
 
-  function setStatus(key) {
+  function setStatus(key, detail = "") {
     statusKey = key;
+    statusDetail = detail;
     render();
   }
 
@@ -58,6 +62,9 @@ export function setupPreview({ t, formatSize }) {
     content.replaceChildren();
     current = null;
     statusKey = "";
+    statusDetail = "";
+    retryAvailable = false;
+    if ($("preview-retry")) $("preview-retry").hidden = true;
     download.removeAttribute("href");
   }
 
@@ -91,9 +98,26 @@ export function setupPreview({ t, formatSize }) {
 
     const requestController = new AbortController();
     controller = requestController;
-    const timer = setTimeout(() => requestController.abort(), PREVIEW_TIMEOUT_MS);
-    activeTimer = timer;
+    let timer = null;
     try {
+      if (ensureAvailable) {
+        setStatus("storagePreparing", t("storagePreparing", { name: current.filename }));
+        await ensureAvailable(current, {
+          signal: requestController.signal,
+          preview: true,
+          onProgress: (snapshot) => {
+            if (version !== revision) return;
+            const percent = typeof snapshot.storage_job?.progress === "number" ? Math.round(snapshot.storage_job.progress) : 0;
+            if (["cold", "restoring"].includes(snapshot.storage_state)) setStatus("storageRestoring", t("storageRestoreProgress", { percent }));
+          },
+        });
+        if (version !== revision) return;
+        setStatus("previewLoading");
+      }
+      // Restoration has its own bounded polling period; the content request
+      // timeout begins only once a complete hot file is available.
+      timer = setTimeout(() => requestController.abort(), PREVIEW_TIMEOUT_MS);
+      activeTimer = timer;
       // HEAD catches deleted media before handing the URL to a browser viewer.
       const response = await fetch(previewUrl, {
         method: kind === "text" ? "GET" : "HEAD",
@@ -140,8 +164,11 @@ export function setupPreview({ t, formatSize }) {
       }
       element.src = previewUrl;
       content.replaceChildren(element);
-    } catch {
-      if (version === revision) setStatus("previewError");
+    } catch (error) {
+      if (version === revision) {
+        retryAvailable = Boolean(ensureAvailable);
+        setStatus(ensureAvailable ? "storageFailed" : "previewError", ensureAvailable ? storageErrorMessage(error) : "");
+      }
     } finally {
       clearTimeout(timer);
       if (activeTimer === timer) activeTimer = null;
@@ -150,6 +177,11 @@ export function setupPreview({ t, formatSize }) {
   }
 
   $("close-preview").addEventListener("click", close);
+  $("preview-retry")?.addEventListener("click", () => { if (current) void open(current); });
+  download.addEventListener("click", (event) => {
+    if (!current || !download.getAttribute("href")) { event.preventDefault(); return; }
+    onDownload?.({ ...current }, event);
+  });
   dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
   dialog.addEventListener("close", () => { if (!dialog.open) cleanup(); });
   download.addEventListener("click", (event) => {

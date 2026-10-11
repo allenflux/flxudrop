@@ -84,11 +84,14 @@
     <section aria-labelledby="page-title">
       <div class="panel-heading"><h2 id="page-title" data-i18n="directory">文件目录</h2><button id="refresh" class="button" disabled>刷新列表</button></div>
       <p id="summary" class="muted">查看和管理已上传的文件</p>
+      <p id="storage-config" class="field-help" role="status" hidden></p>
       <div id="selection-bar" class="selection-bar" hidden>
         <label class="select-all-label"><input id="select-all" type="checkbox"><span data-i18n="selectPage">全选本页</span></label>
         <span id="selection-count" class="muted" aria-live="polite">已选 0 个</span>
         <div class="batch-actions">
           <a id="bulk-download" class="button" href="#" target="download-frame" aria-disabled="true" data-i18n="bulkDownload">批量下载</a>
+          <button id="bulk-cold" class="button" disabled data-i18n="setCold">设为冷文件</button>
+          <button id="cancel-download-wait" class="button" hidden data-i18n="cancelDownloadWait">取消等待</button>
           <button id="bulk-delete" class="button" disabled data-i18n="bulkDelete">批量删除</button>
         </div>
       </div>
@@ -105,7 +108,7 @@
       <div id="empty-state" class="empty-state" hidden><h2 data-i18n="emptyTitle">还没有上传文件</h2><p class="muted" data-i18n="emptyHint">上传完成后，点击“刷新列表”即可查看。</p></div>
       <div id="table-wrap" class="table-wrap" hidden>
         <table>
-          <thead><tr><th scope="col" data-i18n="fileName">文件名</th><th scope="col" data-i18n="size">大小</th><th scope="col" data-i18n="uploaded">上传时间</th><th scope="col" class="actions-heading" data-i18n="actions">操作</th></tr></thead>
+          <thead><tr><th scope="col" data-i18n="fileName">文件名</th><th scope="col" data-i18n="size">大小</th><th scope="col" data-i18n="uploaded">上传时间</th><th scope="col" data-i18n="storageState">存储状态</th><th scope="col" class="actions-heading" data-i18n="actions">操作</th></tr></thead>
           <tbody id="file-list"></tbody>
         </table>
       </div>
@@ -135,7 +138,7 @@
     <p id="preview-meta" class="field-help"></p>
     <p id="preview-status" class="notice" role="status" aria-live="polite" hidden></p>
     <div id="preview-content" class="preview-content"></div>
-    <div class="dialog-actions"><a id="preview-download" class="button" data-i18n="download">下载</a></div>
+    <div class="dialog-actions"><button id="preview-retry" class="button" type="button" data-i18n="retryStorage" hidden>重试</button><a id="preview-download" class="button" data-i18n="download">下载</a></div>
   </dialog>
   <dialog id="link-dialog" aria-labelledby="link-title">
     <h2 id="link-title" data-i18n="copyLink">复制下载链接</h2>

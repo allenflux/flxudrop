@@ -4,7 +4,7 @@ FluxDrop is a tiny self-hosted file drop service for servers where uploading fil
 Start it on any internet-reachable machine, then upload from another server with `curl`.
 After each upload, FluxDrop returns a download URL.
 
-It only uses the Python standard library.
+The default local-only mode uses the Python standard library. Optional S3 cold storage uses Boto3 and cryptography.
 
 ## Start
 
@@ -173,6 +173,96 @@ python3 app.py
 curl -H 'Authorization: Bearer change-me' -T ./file.log http://allenflux.tech:8090/upload
 ```
 
+## 冷热存储
+
+冷热存储默认关闭，现有启动方式和文件链接继续可用。启用后，距最近内容访问、内容修改和上传时间均超过七天的文件会自动迁冷；页面的每行操作和选择工具栏提供 **设为冷文件**，可手动或批量提前迁冷。手动操作仅跳过时间门槛，上传、回读验证与安全删除规则相同。页面显示冷热状态、任务进度、失败原因，并支持取消或重试。
+
+文件按原始块独立压缩、AES-GCM 加密后保存到私有 S3 归档。全部块回读验证完成后才释放本地原件。下载和有效在线预览会合并触发一次完整恢复；恢复后保留远端副本，下次迁冷可复用。文件列表、目录浏览和 HEAD 不会触发恢复。目录按整个上传 ZIP 归档，读取一个子文件会恢复整个 ZIP。具体方案见 [冷热存储设计文档](docs/cold-storage-design.md)。
+
+S3 超时或暂时故障会退避重试；迁冷失败保留本地原件。冷文件恢复未能在等待时间内完成时，公开内容接口返回 `503` 与 `Retry-After`，容量不足返回 `507`，不会返回残缺文件。已有热文件仍可读取。冷归档仅使用 S3 Standard；静态域名不参与加密归档的读取。
+
+启用时先校验本地配置、可选依赖和加密主密钥；缺失或无效会拒绝启动。S3 客户端与连接在后台任务首次使用时初始化，网络故障不会阻止已有热文件的 HTTP 服务启动。冷存储的进程锁使用 Linux/macOS 的文件锁，Docker 部署运行在 Linux。
+
+删除会先持久化墓碑并隐藏项目，再清理远端对象。若远端清理因权限错误停止，修复 IAM 权限后重启服务即可继续，也可以使用原文件 ID 再次调用删除接口；重复删除墓碑项目会安全重试清理。
+
+启用后的接口：
+
+- `POST /api/files/FILE_ID/cold` 提交手动迁冷，返回 `202`、任务 ID 和存储状态；重复提交复用现有任务。沿用管理令牌权限。
+- `GET /api/files/FILE_ID/storage` 返回 `storage_state`、`storage_job` 和最后内容访问时间，不触发回热。已知文件 ID 可公开查询，响应不包含凭据、主密钥或远端对象地址。
+- `POST /api/files/FILE_ID/restore` 提交回热，供已知分享链接和前端等待恢复；可用 `preview=1` 检查预览格式，目录子文件另带 URL 编码的 `path`。无效路径或预览请求不回热。
+- `POST /api/storage-jobs/JOB_ID/cancel` 取消尚未驱逐的迁冷任务，沿用管理令牌权限。重复取消保持幂等；驱逐已经提交时返回 `409` 和 `storage_cancel_committed`。
+
+### 部署与密钥
+
+先轮换曾公开粘贴的 AWS 访问密钥。使用标准 [Boto3 凭据来源](https://docs.aws.amazon.com/boto3/latest/guide/credentials.html)：IAM 角色、环境变量或共享凭据文件。服务需要归档前缀内对象的 `GetObject`、`PutObject`、`DeleteObject`，以及对应前缀的 `ListBucket` 权限。归档 bucket 保持私有，凭据和加密主密钥都不写入源码或前端。
+
+生成独立的 32 字节加密主密钥；以下命令拒绝覆盖已有密钥文件：
+
+```bash
+mkdir -p secrets
+chmod 700 secrets
+python3 - <<'PY'
+import base64
+import json
+import os
+
+with open("secrets/keys.json", "x", encoding="utf-8") as target:
+    os.chmod(target.name, 0o600)
+    json.dump({"active": "v1", "keys": {"v1": base64.b64encode(os.urandom(32)).decode("ascii")}}, target)
+PY
+cp .env.example .env
+```
+
+编辑 `.env` 的 bucket、region 和 endpoint，并设置 `FLUXDROP_COLD_STORAGE_ENABLED=1`。Docker Compose 自动读取 `.env`，把 `secrets/` 只读挂载到容器内；加密 keyring 固定读取 `secrets/keys.json`。在 `secrets/aws-credentials` 保存 AWS 共享凭据格式（或使用 `.env` 中标准 `AWS_ACCESS_KEY_ID`、`AWS_SECRET_ACCESS_KEY`，临时凭据还需 `AWS_SESSION_TOKEN`）：
+
+```ini
+[default]
+aws_access_key_id = replace-with-rotated-access-key
+aws_secret_access_key = replace-with-rotated-secret-key
+```
+
+```bash
+chmod 600 .env secrets/aws-credentials
+docker compose up -d --build
+```
+
+原生 Python 部署先安装可选依赖，并显式加载环境变量；应用不会自行读取 `.env`：
+
+```bash
+python3 -m pip install -r requirements.txt
+set -a
+. ./.env
+set +a
+export AWS_SHARED_CREDENTIALS_FILE="$PWD/secrets/aws-credentials"
+python3 app.py
+```
+
+把 keyring 与整个数据目录（包括元数据数据库）分别备份到 VPS 之外。AWS 凭据可以轮换；丢失归档使用的加密主密钥则无法恢复文件。keyring 的 `active` 决定新归档的主密钥 ID；轮换时添加新 ID 并切换 `active`，保留旧 ID 与旧密钥以恢复已有归档。不要在仍有冷文件时关闭功能或移除其数据库、keyring。
+
+### 冷存储配置
+
+| 环境变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `FLUXDROP_COLD_STORAGE_ENABLED` | `0` | 显式启用冷热存储 |
+| `FLUXDROP_S3_BUCKET` | 空 | 私有 bucket；启用时必填 |
+| `FLUXDROP_S3_REGION` | `ap-northeast-3` | S3 区域 |
+| `FLUXDROP_S3_ENDPOINT` | 空 | 可选 S3 API endpoint；空值使用 SDK 默认地址 |
+| `FLUXDROP_S3_PREFIX` | `fluxdrop-cold/` | 归档对象的专用前缀 |
+| `FLUXDROP_ENCRYPTION_KEY_FILE` | 空 | UTF-8 JSON keyring 路径；启用时必填 |
+| `FLUXDROP_ENCRYPTION_KEY_ID` | keyring 的 `active` | 新归档使用的主密钥 ID |
+| `FLUXDROP_COLD_IDLE_DAYS` | `7` | 自动迁冷的闲置天数 |
+| `FLUXDROP_COLD_BLOCK_MB` | `32` | 每块原始数据 MiB；最大 64 |
+| `FLUXDROP_COLD_MAX_OBJECT_MB` | `100` | 最终密文对象上限 MiB |
+| `FLUXDROP_COLD_DISK_RESERVE_MB` | `512` | 上传和恢复不得占用的磁盘余量 MiB |
+| `FLUXDROP_COLD_WAIT_SECONDS` | `15` | 内容请求等待恢复的上限秒数 |
+| `FLUXDROP_COLD_SCAN_SECONDS` | `300` | 自动迁冷检查间隔秒数 |
+| `FLUXDROP_COLD_RETRY_BASE_SECONDS` | `2` | 后台重试的初始退避秒数 |
+| `FLUXDROP_COLD_RETRY_MAX_SECONDS` | `300` | 后台重试退避上限秒数 |
+| `FLUXDROP_S3_CONNECT_TIMEOUT` | `5` | 单次 S3 连接超时秒数 |
+| `FLUXDROP_S3_READ_TIMEOUT` | `30` | 单次 S3 读取超时秒数 |
+
+Docker 的 `FLUXDROP_SECRETS_DIR` 是宿主机密钥目录，默认 `./secrets`。原生部署用 `FLUXDROP_ENCRYPTION_KEY_FILE` 指定实际路径。大小配置按 MiB（1,048,576 字节）计算；恢复前需要预约完整原文件空间，单个文件大于可分配磁盘空间时不能完整回热。冷热存储会释放 VPS 副本，不等同于立即备份所有新上传文件。
+
 ## Run As A Systemd Service
 
 Create `/etc/systemd/system/fluxdrop.service`:
@@ -211,7 +301,10 @@ sudo systemctl enable --now fluxdrop
 
 ## Tests
 
+Install the optional dependencies to run the complete suite, including cold-storage tests. These tests use an in-memory remote store and need no AWS credentials.
+
 ```bash
+python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s tests -v
 ```
 

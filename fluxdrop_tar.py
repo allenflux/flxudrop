@@ -17,6 +17,7 @@ from fluxdrop_directories import (
     _DirectoryIndex,
     validate_directory_archive,
 )
+from fluxdrop_multipart import budgeted_writer
 
 
 MAX_TAR_EXTENDED_HEADER_BYTES = 64 * 1024
@@ -45,7 +46,7 @@ class _LimitedTarStream:
         return chunk
 
 
-def convert_tar_directory(source_path: Path, target_path: Path, max_bytes: int):
+def convert_tar_directory(source_path: Path, target_path: Path, max_bytes: int, *, reservation=None):
     index = _DirectoryIndex(max_bytes)
     records = metadata_bytes = 0
     content_end = 0
@@ -113,7 +114,10 @@ def convert_tar_directory(source_path: Path, target_path: Path, max_bytes: int):
             decoded = stack.enter_context(gzip.GzipFile(fileobj=raw)) if signature == b"\x1f\x8b" else raw
             bounded = _LimitedTarStream(decoded, max_bytes + MAX_DIRECTORY_METADATA_BYTES)
             archive = stack.enter_context(tarfile.open(fileobj=bounded, mode="r|", tarinfo=BoundedTarInfo))
-            output = stack.enter_context(zipfile.ZipFile(target_path, "w", compression=zipfile.ZIP_STORED))
+            raw_output = stack.enter_context(target_path.open("w+b"))
+            output = stack.enter_context(zipfile.ZipFile(
+                budgeted_writer(raw_output, reservation), "w", compression=zipfile.ZIP_STORED
+            ))
             for member in archive:
                 if member.size < 0:
                     raise ValueError("Invalid directory tar entry size")
@@ -159,7 +163,7 @@ def convert_tar_directory(source_path: Path, target_path: Path, max_bytes: int):
         raise ValueError("Invalid or truncated directory tar archive") from exc
 
 
-def prepare_directory_archive(source_path: Path, converted_path: Path, max_bytes: int):
+def prepare_directory_archive(source_path: Path, converted_path: Path, max_bytes: int, *, reservation=None):
     """Preserve ZIPs, or convert streamed tar archives without extracting paths."""
     try:
         is_zip = zipfile.is_zipfile(source_path)
@@ -167,6 +171,6 @@ def prepare_directory_archive(source_path: Path, converted_path: Path, max_bytes
         raise ValueError("Invalid directory ZIP archive") from exc
     if is_zip:
         return validate_directory_archive(source_path, max_bytes)
-    summary = convert_tar_directory(source_path, converted_path, max_bytes)
+    summary = convert_tar_directory(source_path, converted_path, max_bytes, reservation=reservation)
     os.replace(converted_path, source_path)
     return summary

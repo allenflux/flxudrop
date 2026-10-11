@@ -1,0 +1,21 @@
+{
+  "source": "static/app.css",
+  "scope": "本次设计文档",
+  "font_source": "system",
+  "paper": "#ffffff",
+  "paper_2": "#f4f4f5",
+  "ink": "#222222",
+  "ink_strong": "#111111",
+  "muted": "#666666",
+  "soft": "#666666",
+  "rule": "#dddddd",
+  "rule_solid": "#aaaaaa",
+  "accent": "#333333",
+  "accent_tint": "#f4f4f5",
+  "link": "#333333",
+  "title_font": "system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif",
+  "node_font": "system-ui, -apple-system, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif",
+  "technical_font": "ui-monospace, SFMono-Regular, Menlo, monospace",
+  "size_preset": "doc-inline",
+  "viewBox": "0 0 960 600"
+}

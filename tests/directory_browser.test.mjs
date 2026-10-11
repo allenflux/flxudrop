@@ -33,7 +33,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 const root = { file_id: "folder-id", filename: "结果", file_count: 2, size: 1234, download_url: "/f/folder-id/results.zip", download_filename: "结果.zip" };
 const child = { filename: "same.txt", path: "nested/same.txt", kind: "file", size: 4, preview_type: "text", preview_url: "/p/folder-id/same.txt?path=nested%2Fsame.txt", download_url: "/f/folder-id/same.txt?path=nested%2Fsame.txt" };
 
-function harness(context, responder) {
+function harness(context, responder, options = {}) {
   const nodes = new Map();
   const $ = (id) => { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); };
   const previous = new Map(["document", "location"].map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
@@ -46,6 +46,7 @@ function harness(context, responder) {
     api: async (path) => { state.requests.push(path); return responder(path); },
     onPreview: (entry) => state.previews.push(entry),
     onAuthRequired: () => state.auth++,
+    ...options,
   });
   context.after(() => {
     browser.close();
@@ -130,4 +131,21 @@ test("unsafe child download links cannot be followed", async (context) => {
   await ui.browser.open({ ...root, download_url: "//other.test/f/file" });
   assert.equal(ui.$("directory-download").href, null);
   assert.equal(ui.$("directory-entries").children[0].children[1].children[1].href, null);
+});
+
+test("browsing a cold directory uses its resident listing and associates children with the parent", async (context) => {
+  const downloads = [];
+  const ui = harness(context, () => ({ entries: [child] }), { onDownload: (file, event) => { event.preventDefault(); downloads.push(file); } });
+  await ui.browser.open({ ...root, storage_state: "cold", storage_job: null });
+  assert.deepEqual(ui.state.requests, ["/api/directories/folder-id?path="]);
+  const actions = ui.$("directory-entries").children[0].children[1];
+  actions.children[0].fire("click");
+  assert.equal(ui.state.previews[0].storage_file_id, "folder-id");
+  assert.equal(ui.state.previews[0].storage_state, "cold");
+  assert.equal(ui.state.previews[0].preview_url, child.preview_url);
+  actions.children[1].fire("click");
+  assert.equal(downloads[0].storage_file_id, "folder-id");
+  assert.equal(downloads[0].download_url, child.download_url);
+  ui.$("directory-download").fire("click");
+  assert.equal(downloads[1].file_id, "folder-id");
 });

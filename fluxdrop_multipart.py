@@ -15,6 +15,49 @@ MAX_HEADER_BYTES = 16 * 1024
 _BOUNDARY_RE = re.compile(rb"[0-9A-Za-z'()+_,./:=? -]{1,70}")
 
 
+class _BudgetedWriter:
+    """Reserve only file growth, including seekable ZIP metadata writes.
+
+    Flushing before consuming the reservation transfers the space accounting
+    from the in-flight budget to the filesystem's actual free-space figure.
+    The caller owns both the underlying file and reservation lifetimes.
+    """
+
+    def __init__(self, target: BinaryIO, reservation) -> None:
+        self.target = target
+        self.reservation = reservation
+        position = target.tell()
+        self.extent = target.seek(0, 2)
+        target.seek(position)
+
+    def __getattr__(self, name):
+        return getattr(self.target, name)
+
+    def write(self, data):
+        growth = max(0, self.target.tell() + len(data) - self.extent)
+        if growth:
+            self.reservation.grow(growth)
+        written = self.target.write(data)
+        new_extent = max(self.extent, self.target.tell())
+        consumed = new_extent - self.extent
+        if consumed:
+            self.target.flush()
+            self.reservation.consume(consumed)
+        self.extent = new_extent
+        return written
+
+    def truncate(self, size=None):
+        size = self.target.tell() if size is None else size
+        result = self.target.truncate(size)
+        self.extent = size
+        return result
+
+
+def budgeted_writer(target: BinaryIO, reservation=None):
+    """Wrap a seekable output only when disk reservations are enabled."""
+    return _BudgetedWriter(target, reservation) if reservation is not None else target
+
+
 class _MultipartReader:
     def __init__(self, source: BinaryIO, content_length: int, boundary: bytes) -> None:
         self.source = source
@@ -146,6 +189,8 @@ def read_multipart_to_file(
     target_path: Path,
     content_length: int,
     content_type: str,
+    *,
+    reservation=None,
 ) -> tuple[str | None, str | None, int]:
     """Save the first file part and return its filename, content type and size.
 
@@ -158,7 +203,8 @@ def read_multipart_to_file(
     reader, parser = _start_multipart(source, content_length, content_type)
     closing, _ = reader.read_to_boundary()
     selected: tuple[str | None, str | None, int] | None = None
-    with target_path.open("wb") as target:
+    with target_path.open("wb") as raw_target:
+        target = budgeted_writer(raw_target, reservation)
         while not closing:
             headers = parser.parsebytes(reader.read_headers())
             if headers.defects:
@@ -188,6 +234,7 @@ def read_multipart_files(
     *,
     temp_dir: Path,
     max_parts: int,
+    reservation=None,
 ) -> None:
     """Stream named file parts through a temporary file into ``consume``.
 
@@ -214,7 +261,8 @@ def read_multipart_files(
             encoding = str(headers.get("Content-Transfer-Encoding", "binary")).strip().lower()
             if encoding not in {"binary", "8bit", "7bit"}:
                 raise ValueError("Encoded multipart file parts are not supported")
-            with tempfile.TemporaryFile(dir=temp_dir) as target:
+            with tempfile.TemporaryFile(dir=temp_dir) as raw_target:
+                target = budgeted_writer(raw_target, reservation)
                 closing, size = reader.read_to_boundary(target)
                 target.seek(0)
                 consume(filename, target, size)

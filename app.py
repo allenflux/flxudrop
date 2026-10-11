@@ -39,6 +39,7 @@ from fluxdrop_directories import (
     validate_relative_path,
 )
 from fluxdrop_tar import prepare_directory_archive
+from fluxdrop_storage import ColdStorage, StorageSettings, StorageError, StorageNotFound
 
 
 DEFAULT_MAX_UPLOAD_MB = 8192
@@ -65,6 +66,7 @@ STATIC_ROUTES = {
     "/static/file-actions.mjs": ("file-actions.mjs", "text/javascript; charset=utf-8"),
     "/static/browser-upload.mjs": ("browser-upload.mjs", "text/javascript; charset=utf-8"),
     "/static/file-preview.mjs": ("file-preview.mjs", "text/javascript; charset=utf-8"),
+    "/static/file-storage.mjs": ("file-storage.mjs", "text/javascript; charset=utf-8"),
     "/static/directory-browser.mjs": ("directory-browser.mjs", "text/javascript; charset=utf-8"),
     "/static/i18n.mjs": ("i18n.mjs", "text/javascript; charset=utf-8"),
     "/static/favicon.svg": ("favicon.svg", "image/svg+xml"),
@@ -130,6 +132,9 @@ def preview_metadata(config: FluxDropConfig, stored: StoredFile) -> dict[str, st
             "preview_url": "",
             "browse_url": f"/api/directories/{stored.file_id}",
         }
+    if config.cold_storage:
+        preview_type = config.cold_storage.cached_metadata(stored.file_id).get("preview_type", "unsupported")
+        return {"preview_type": preview_type, "preview_url": f"/p/{stored.file_id}/{quote(stored.filename, safe='')}"}
     try:
         with (config.files_dir / stored.file_id).open("rb") as source:
             preview_type, _ = classify_preview(stored.filename, source.read(PREVIEW_SAMPLE_BYTES))
@@ -179,6 +184,7 @@ class FluxDropConfig:
         public_base_url: str | None,
         upload_token: str | None,
         max_upload_bytes: int,
+        cold_storage: ColdStorage | None = None,
     ) -> None:
         self.storage_dir = storage_dir
         self.public_base_url = public_base_url.rstrip("/") if public_base_url else None
@@ -186,10 +192,87 @@ class FluxDropConfig:
         self.max_upload_bytes = max_upload_bytes
         self.files_dir = storage_dir / "files"
         self.meta_dir = storage_dir / "meta"
+        self.cold_storage = cold_storage
 
     def ensure_dirs(self) -> None:
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self.meta_dir.mkdir(parents=True, exist_ok=True)
+        if self.cold_storage is None:
+            settings = StorageSettings.from_env(self.storage_dir)
+            if settings.enabled:
+                self.cold_storage = ColdStorage(self.storage_dir, settings=settings)
+        if self.cold_storage:
+            for path in self.meta_dir.glob("*.json"):
+                if not FILE_ID_RE.fullmatch(path.stem):
+                    continue
+                stored = load_metadata(self, path.stem)
+                if stored is None:
+                    continue
+                self.cold_storage.register_file(asdict(stored))
+                cached = self.cold_storage.cached_metadata(stored.file_id)
+                if not cached.get("preview_type") or stored.kind == "directory" and "directory_entries" not in cached:
+                    cache_storage_metadata(self, stored)
+            self.cold_storage.start_worker()
+
+    def close(self) -> None:
+        if self.cold_storage:
+            self.cold_storage.close()
+
+
+def content_display_metadata(filename: str, source: BinaryIO, size: int) -> dict:
+    preview_type, content_type = classify_preview(filename, source.read(PREVIEW_SAMPLE_BYTES))
+    result = {"preview_type": preview_type, "content_type": content_type, "size": size}
+    if preview_type == "text":
+        source.seek(0)
+        payload, truncated = text_preview(source)
+        result.update(preview_size=len(payload), preview_truncated=truncated)
+    return result
+
+
+def text_preview(source: BinaryIO) -> tuple[bytes, bool]:
+    sample = source.read(MAX_TEXT_PREVIEW_BYTES + 1)
+    truncated = len(sample) > MAX_TEXT_PREVIEW_BYTES
+    text = codecs.getincrementaldecoder("utf-8")("replace").decode(sample[:MAX_TEXT_PREVIEW_BYTES], final=not truncated)
+    payload = text.encode("utf-8")
+    if len(payload) > MAX_TEXT_PREVIEW_BYTES:
+        truncated = True
+        payload = payload[:MAX_TEXT_PREVIEW_BYTES].decode("utf-8", errors="ignore").encode("utf-8")
+    return payload, truncated
+
+
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def cache_storage_metadata(config: FluxDropConfig, stored: StoredFile) -> None:
+    """Keep the directory index and preview headers available without a recall."""
+    manager = config.cold_storage
+    if not manager:
+        return
+    path = config.files_dir / stored.file_id
+    if not path.is_file():
+        return
+    if stored.kind == "directory":
+        entries = []
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                relative = info.filename.removeprefix(stored.filename + "/").rstrip("/")
+                if not relative or info.filename == stored.filename + "/":
+                    continue
+                entry = {"path": relative, "kind": "directory" if info.is_dir() else "file", "size": info.file_size}
+                if not info.is_dir():
+                    with archive.open(info) as source:
+                        entry.update(content_display_metadata(relative, source, info.file_size))
+                entries.append(entry)
+        cached = {"preview_type": "directory", "content_type": "application/zip", "directory_entries": entries}
+    else:
+        with path.open("rb") as source:
+            cached = content_display_metadata(stored.filename, source, stored.size)
+    manager.cache_metadata(stored.file_id, cached)
 
 
 def sanitize_filename(name: str | None) -> str:
@@ -286,6 +369,7 @@ def read_exactly_to_file(
     target_path: Path,
     content_length: int,
     max_upload_bytes: int,
+    reservation=None,
 ) -> int:
     if content_length < 0:
         raise ValueError("Content-Length is required")
@@ -299,13 +383,18 @@ def read_exactly_to_file(
             chunk = source.read(min(CHUNK_SIZE, remaining))
             if not chunk:
                 raise ValueError("Upload ended before Content-Length bytes were received")
+            if reservation:
+                reservation.grow(len(chunk))
             target.write(chunk)
+            if reservation:
+                target.flush()
+                reservation.consume(len(chunk))
             written += len(chunk)
             remaining -= len(chunk)
     return written
 
 
-def read_chunked_to_file(source: BinaryIO, target_path: Path, max_upload_bytes: int) -> int:
+def read_chunked_to_file(source: BinaryIO, target_path: Path, max_upload_bytes: int, reservation=None) -> int:
     """Decode a bounded HTTP chunked body, validating framing and trailers."""
     written = framing_bytes = chunks = 0
 
@@ -350,7 +439,12 @@ def read_chunked_to_file(source: BinaryIO, target_path: Path, max_upload_bytes: 
                 chunk = source.read(min(CHUNK_SIZE, remaining))
                 if not chunk:
                     raise ValueError("Chunked upload ended before all bytes were received")
+                if reservation:
+                    reservation.grow(len(chunk))
                 target.write(chunk)
+                if reservation:
+                    target.flush()
+                    reservation.consume(len(chunk))
                 written += len(chunk)
                 remaining -= len(chunk)
             if source.read(2) != b"\r\n":
@@ -371,13 +465,22 @@ def save_metadata(config: FluxDropConfig, stored: StoredFile) -> None:
         ) as target:
             temp_path = Path(target.name)
             json.dump(asdict(stored), target, ensure_ascii=False, indent=2)
+            if config.cold_storage:
+                target.flush()
+                os.fsync(target.fileno())
         os.replace(temp_path, meta_path)
+        if config.cold_storage:
+            sync_directory(config.meta_dir)
+            config.cold_storage.register_file(asdict(stored))
+            cache_storage_metadata(config, stored)
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
 
 
 def load_metadata(config: FluxDropConfig, file_id: str) -> StoredFile | None:
+    if config.cold_storage and config.cold_storage.is_deleted(file_id):
+        return None
     meta_path = config.meta_dir / f"{file_id}.json"
     try:
         data = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -418,9 +521,16 @@ def store_file(
         file_count=file_count,
     )
     try:
+        if config.cold_storage:
+            with final_path.open("rb") as source:
+                os.fsync(source.fileno())
+            sync_directory(config.files_dir)
         save_metadata(config, stored)
     except Exception:
+        if config.cold_storage and config.cold_storage.has_file(file_id):
+            config.cold_storage.delete_file(file_id)
         final_path.unlink(missing_ok=True)
+        (config.meta_dir / f"{file_id}.json").unlink(missing_ok=True)
         raise
     return stored
 
@@ -443,6 +553,9 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/files/download":
             self.send_bulk_download(parsed.query)
+            return
+        if re.fullmatch(r"/api/files/[^/]+/storage", parsed.path):
+            self.storage_action(parsed.path.split("/")[3], "status", parsed.query)
             return
         if parsed.path.startswith("/api/directories/"):
             if self.check_management_auth():
@@ -471,6 +584,16 @@ class FluxDropHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        match = re.fullmatch(r"/api/files/([^/]+)/(cold|restore)", parsed.path)
+        if match:
+            if match[2] == "restore" or self.check_management_auth():
+                self.storage_action(match[1], match[2], parsed.query)
+            return
+        match = re.fullmatch(r"/api/storage-jobs/([^/]+)/cancel", parsed.path)
+        if match:
+            if self.check_management_auth():
+                self.storage_action(match[1], "cancel", parsed.query)
+            return
         if parsed.path == "/upload-directory":
             if self.check_upload_auth():
                 if self.headers.get_content_type() != "multipart/form-data":
@@ -537,14 +660,21 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         if not FILE_ID_RE.fullmatch(file_id):
             self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
             return
-        if load_metadata(self.config, file_id) is None:
+        if load_metadata(self.config, file_id) is None and not (self.config.cold_storage and self.config.cold_storage.is_deleted(file_id)):
             self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
             return
         try:
+            if self.config.cold_storage:
+                self.config.cold_storage.delete_file(file_id)
+                self.send_json(HTTPStatus.OK, {"ok": True, "file_id": file_id})
+                return
             # Remove data first so a failed unlink leaves a usable metadata record.
             # A retry can also clean up metadata left by a partial deletion.
             (self.config.files_dir / file_id).unlink(missing_ok=True)
             (self.config.meta_dir / f"{file_id}.json").unlink(missing_ok=True)
+        except StorageError as exc:
+            self.send_storage_error(exc)
+            return
         except OSError as exc:
             self.log_error("Could not delete file %s: %s", file_id, exc)
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not complete file deletion")
@@ -553,6 +683,69 @@ class FluxDropHandler(BaseHTTPRequestHandler):
 
     def check_management_auth(self) -> bool:
         return self.check_upload_auth()
+
+    def send_storage_error(self, exc: StorageError) -> None:
+        raw = json.dumps({"ok": False, "error": str(exc), "error_code": getattr(exc, "code", type(exc).__name__)}).encode("utf-8")
+        self.send_response(getattr(exc, "status", 503))
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if getattr(exc, "status", 503) == 503:
+            self.send_header("Retry-After", str(max(1, int(getattr(exc, "retry_after", 3)))))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(raw)
+
+    def storage_fields(self, file_id: str) -> dict:
+        manager = self.config.cold_storage
+        if not manager:
+            return {}
+        info = manager.storage_info(file_id)
+        return {"storage_state": info["state"], "storage_job": info.get("job"), "last_content_access_at": info.get("last_content_access_at")}
+
+    def storage_action(self, item_id: str, action: str, query: str) -> None:
+        manager = self.config.cold_storage
+        if not manager:
+            self.send_error_json(HTTPStatus.CONFLICT, "Cold storage is not enabled")
+            return
+        try:
+            if action == "cancel":
+                if query:
+                    raise ValueError("Unexpected query parameters")
+                result = manager.cancel_job(item_id)
+                if result.get("already_committed"):
+                    self.send_json(HTTPStatus.CONFLICT, {"ok": False, "error": "The cold transition has already committed; download or preview to restore the file", "error_code": "storage_cancel_committed"})
+                    return
+                self.send_json(HTTPStatus.OK, {"ok": True, **result})
+                return
+            stored = load_metadata(self.config, item_id) if FILE_ID_RE.fullmatch(item_id) else None
+            if stored is None or not manager.has_file(item_id):
+                self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
+                return
+            if action == "restore":
+                params = parse_qs(query, keep_blank_values=True, max_num_fields=2, errors="strict")
+                if set(params) - {"path", "preview"} or any(len(values) != 1 for values in params.values()) or params.get("preview", ["1"])[0] != "1":
+                    raise ValueError("Invalid restore parameters")
+                content_query = "path=" + quote(params["path"][0], safe="") if "path" in params else ""
+                display = self.stored_content_metadata(stored, content_query)
+                if "preview" in params and display.get("preview_type") in {"unsupported", "directory"}:
+                    self.send_preview_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "This file type cannot be previewed; download the file instead")
+                    return
+                result = manager.request_restore(item_id, content_access=True)
+            else:
+                if query:
+                    raise ValueError("Unexpected query parameters")
+                result = manager.request_cold(item_id, manual=True) if action == "cold" else {}
+            fields = self.storage_fields(item_id)
+            status = HTTPStatus.ACCEPTED if action == "cold" or action == "restore" and fields["storage_state"] not in {"hot", "hot_backed"} else HTTPStatus.OK
+            self.send_json(status, {"ok": True, **result, **fields})
+        except StorageError as exc:
+            self.send_storage_error(exc)
+        except FileNotFoundError:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
+        except (ValueError, UnicodeError) as exc:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
 
     def send_bulk_download(self, query: str) -> None:
         try:
@@ -570,11 +763,12 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             entries = []
             used_names: set[str] = set()
             try:
-                for file_id in file_ids:
-                    stored = load_metadata(self.config, file_id)
-                    if stored is None:
-                        raise FileNotFoundError(file_id)
-                    source = stack.enter_context((self.config.files_dir / file_id).open("rb"))
+                selected = [load_metadata(self.config, file_id) for file_id in file_ids]
+                manager = self.config.cold_storage
+                if any(stored is None or manager and not manager.has_file(stored.file_id) for stored in selected):
+                    raise FileNotFoundError("selection")
+                for stored in selected:
+                    source, _, _ = self.open_stored_content(stored, "", stack)
                     info = zipfile.ZipInfo(
                         archive_filename(stored.download_filename, used_names, preserve_unicode=stored.kind == "directory"),
                         time.gmtime(max(315532800, min(stored.created_at, 4354819198)))[:6],
@@ -582,6 +776,9 @@ class FluxDropHandler(BaseHTTPRequestHandler):
                     info.file_size = os.fstat(source.fileno()).st_size
                     info.external_attr = 0o100600 << 16
                     entries.append((info, source))
+            except StorageError as exc:
+                self.send_storage_error(exc)
+                return
             except FileNotFoundError:
                 self.send_error_json(HTTPStatus.NOT_FOUND, "One or more selected files no longer exist; refresh the file list")
                 return
@@ -615,20 +812,27 @@ class FluxDropHandler(BaseHTTPRequestHandler):
                 if not FILE_ID_RE.fullmatch(file_id):
                     continue
                 stored = load_metadata(self.config, file_id)
-                if stored is None or not (self.config.files_dir / file_id).is_file():
+                exists = self.config.cold_storage.has_file(file_id) if self.config.cold_storage else (self.config.files_dir / file_id).is_file()
+                if stored is None or not exists:
                     continue
-                files.append({
-                    **asdict(stored),
-                    "download_filename": stored.download_filename,
-                    "download_url": f"/f/{file_id}/{quote(stored.download_filename, safe='')}",
-                    **preview_metadata(self.config, stored),
-                })
+                try:
+                    files.append({
+                        **asdict(stored),
+                        "download_filename": stored.download_filename,
+                        "download_url": f"/f/{file_id}/{quote(stored.download_filename, safe='')}",
+                        **preview_metadata(self.config, stored),
+                        **self.storage_fields(file_id),
+                    })
+                except StorageNotFound:
+                    # A deletion may commit between reading JSON and its index.
+                    continue
         except OSError as exc:
             self.log_error("Could not list files: %s", exc)
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not list files")
             return
         files.sort(key=lambda item: (item["created_at"], item["file_id"]), reverse=True)
-        self.send_json(HTTPStatus.OK, {"ok": True, "files": files})
+        storage = {"storage_enabled": True, "storage_error": None} if self.config.cold_storage else {}
+        self.send_json(HTTPStatus.OK, {"ok": True, "files": files, **storage})
 
     def check_upload_auth(self) -> bool:
         token = self.config.upload_token
@@ -656,26 +860,31 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         try:
             with ExitStack() as stack:
                 source = self.rfile
+                reservation = stack.enter_context(self.config.cold_storage.reserve_space(0)) if self.config.cold_storage else None
                 if length == -1 and (multipart or multipart_zip):
-                    length = read_chunked_to_file(source, body_path, self.config.max_upload_bytes)
+                    length = read_chunked_to_file(source, body_path, self.config.max_upload_bytes, reservation=reservation)
                     source = stack.enter_context(body_path.open("rb"))
                 if multipart_zip:
-                    read_multipart_to_file(source, temp_path, length, self.headers.get("Content-Type", ""))
+                    read_multipart_to_file(source, temp_path, length, self.headers.get("Content-Type", ""), reservation=reservation)
                 elif multipart:
                     summary = read_multipart_directory(
                         source, temp_path, length,
                         self.headers.get("Content-Type", ""), self.config.max_upload_bytes,
+                        reservation=reservation,
                     )
                 elif length == -1:
-                    read_chunked_to_file(source, temp_path, self.config.max_upload_bytes)
+                    read_chunked_to_file(source, temp_path, self.config.max_upload_bytes, reservation=reservation)
                 else:
-                    read_exactly_to_file(source, temp_path, length, self.config.max_upload_bytes)
+                    read_exactly_to_file(source, temp_path, length, self.config.max_upload_bytes, reservation=reservation)
                 if not multipart:
-                    summary = prepare_directory_archive(temp_path, converted_path, self.config.max_upload_bytes)
+                    summary = prepare_directory_archive(temp_path, converted_path, self.config.max_upload_bytes, reservation=reservation)
             stored = store_file(
                 self.config, summary.filename, temp_path, temp_path.stat().st_size,
                 kind="directory", file_count=summary.file_count,
             )
+        except StorageError as exc:
+            self.send_storage_error(exc)
+            return
         except OverflowError as exc:
             error = (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
         except ValueError as exc:
@@ -705,17 +914,22 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         temp_path = self.config.storage_dir / f".upload-{secrets.token_hex(12)}.tmp"
         error: tuple[HTTPStatus, str] | None = None
         try:
-            content_type = self.headers.get("Content-Type")
-            if multipart:
-                filename, content_type, size = read_multipart_to_file(
-                    self.rfile, temp_path, length, content_type or ""
-                )
-            else:
-                size = read_exactly_to_file(
-                    self.rfile, temp_path, length, self.config.max_upload_bytes
-                )
-            guessed_filename = filename_or_inferred(filename, temp_path, content_type)
-            stored = store_file(self.config, guessed_filename, temp_path, size)
+            with ExitStack() as stack:
+                reservation = stack.enter_context(self.config.cold_storage.reserve_space(0)) if self.config.cold_storage else None
+                content_type = self.headers.get("Content-Type")
+                if multipart:
+                    filename, content_type, size = read_multipart_to_file(
+                        self.rfile, temp_path, length, content_type or "", reservation=reservation,
+                    )
+                else:
+                    size = read_exactly_to_file(
+                        self.rfile, temp_path, length, self.config.max_upload_bytes, reservation=reservation,
+                    )
+                guessed_filename = filename_or_inferred(filename, temp_path, content_type)
+                stored = store_file(self.config, guessed_filename, temp_path, size)
+        except StorageError as exc:
+            self.send_storage_error(exc)
+            return
         except OverflowError as exc:
             error = (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, str(exc))
         except ValueError as exc:
@@ -800,7 +1014,11 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         self, stored: StoredFile, query: str, stack: ExitStack,
     ) -> tuple[BinaryIO, str, int]:
         """Open a stable file descriptor, or a member stream backed by one."""
-        source = stack.enter_context((self.config.files_dir / stored.file_id).open("rb"))
+        if self.config.cold_storage:
+            self.stored_content_metadata(stored, query)
+            source = stack.enter_context(self.config.cold_storage.open_file(stored.file_id, access=True))
+        else:
+            source = stack.enter_context((self.config.files_dir / stored.file_id).open("rb"))
         if stored.kind == "directory":
             relative_path = self.directory_query_path(query)
             if relative_path:
@@ -815,10 +1033,68 @@ class FluxDropHandler(BaseHTTPRequestHandler):
                 return entry, relative_path.rsplit("/", 1)[-1], info.file_size
         return source, stored.download_filename, os.fstat(source.fileno()).st_size
 
+    def stored_content_metadata(self, stored: StoredFile, query: str) -> dict:
+        relative = self.directory_query_path(query)
+        cached = self.config.cold_storage.cached_metadata(stored.file_id)
+        if stored.kind != "directory":
+            if relative:
+                raise ValueError("A file does not have directory members")
+            return {**cached, "filename": stored.filename, "size": stored.size}
+        if not relative:
+            return {"filename": stored.download_filename, "size": stored.size, "preview_type": "unsupported", "content_type": "application/zip"}
+        for entry in cached.get("directory_entries", []):
+            if entry["path"] == relative and entry["kind"] == "file":
+                return {**entry, "filename": relative.rsplit("/", 1)[-1]}
+        raise FileNotFoundError(relative)
+
+    def send_cached_directory_list(self, stored: StoredFile, query: str) -> None:
+        try:
+            relative = self.directory_query_path(query)
+            prefix = relative + "/" if relative else ""
+            entries = {}
+            exists = not relative
+            for item in self.config.cold_storage.cached_metadata(stored.file_id).get("directory_entries", []):
+                if item["path"] == relative and item["kind"] == "directory":
+                    exists = True
+                if not item["path"].startswith(prefix):
+                    continue
+                remainder = item["path"][len(prefix):]
+                if not remainder:
+                    continue
+                exists = True
+                filename, separator, _ = remainder.partition("/")
+                if filename in entries:
+                    entries[filename]["size"] += item["size"]
+                    continue
+                kind = "directory" if separator or item["kind"] == "directory" else "file"
+                entry_path = prefix + filename
+                encoded = quote(entry_path, safe="")
+                entry = {"filename": filename, "path": entry_path, "kind": kind, "size": item["size"], "preview_type": "directory", "preview_url": "", "download_url": "", "storage_file_id": stored.file_id, **self.storage_fields(stored.file_id)}
+                if kind == "directory":
+                    entry["browse_url"] = f"/api/directories/{stored.file_id}?path={encoded}"
+                else:
+                    entry.update(preview_type=item.get("preview_type", "unsupported"), preview_url=f"/p/{stored.file_id}/{quote(filename, safe='')}?path={encoded}", download_url=f"/f/{stored.file_id}/{quote(filename, safe='')}?path={encoded}", download_filename=filename)
+                entries[filename] = entry
+            if not exists:
+                raise FileNotFoundError(relative)
+        except StorageError as exc:
+            self.send_storage_error(exc)
+            return
+        except (ValueError, UnicodeError) as exc:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        except FileNotFoundError:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "Directory not found")
+            return
+        self.send_json(HTTPStatus.OK, {"ok": True, "file_id": stored.file_id, "filename": stored.filename, "path": relative, "entries": sorted(entries.values(), key=lambda entry: (entry["kind"] != "directory", entry["filename"].casefold()))})
+
     def send_directory_list(self, file_id: str, query: str) -> None:
         stored = load_metadata(self.config, file_id) if FILE_ID_RE.fullmatch(file_id) else None
         if stored is None or stored.kind != "directory":
             self.send_error_json(HTTPStatus.NOT_FOUND, "Directory not found")
+            return
+        if self.config.cold_storage:
+            self.send_cached_directory_list(stored, query)
             return
         try:
             relative_path = self.directory_query_path(query)
@@ -891,6 +1167,9 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         if stored is None:
             self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
             return
+        if self.config.cold_storage:
+            self.send_managed_content(stored, query, head_only=head_only, preview=False)
+            return
         with ExitStack() as stack:
             try:
                 source, filename, size = self.open_stored_content(stored, query, stack)
@@ -913,6 +1192,80 @@ class FluxDropHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if not head_only:
                 shutil.copyfileobj(source, self.wfile, length=CHUNK_SIZE)
+
+    def send_managed_content(self, stored: StoredFile, query: str, *, head_only: bool, preview: bool) -> None:
+        """Validate from the local index before recording a content hit or recall."""
+        try:
+            if not self.config.cold_storage.has_file(stored.file_id):
+                raise StorageNotFound("File content is missing")
+            display = self.stored_content_metadata(stored, query)
+            filename, size = display["filename"], display["size"]
+            text = preview and display.get("preview_type") == "text"
+            if preview and display.get("preview_type", "unsupported") in {"unsupported", "directory"}:
+                self.send_preview_error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "This file type cannot be previewed; download the file instead")
+                return
+            start, end = 0, size - 1
+            status = HTTPStatus.OK
+            ranges = self.headers.get_all("Range", [])
+            if ranges and not text:
+                try:
+                    if len(ranges) != 1:
+                        raise ValueError("Multiple ranges are not supported")
+                    start, end = parse_byte_range(ranges[0], size)
+                except ValueError:
+                    self.send_preview_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, "Invalid or unsatisfiable byte range", size)
+                    return
+                status = HTTPStatus.PARTIAL_CONTENT
+            with ExitStack() as stack:
+                source = None
+                payload = None
+                truncated = display.get("preview_truncated", False)
+                if not head_only:
+                    source, _, _ = self.open_stored_content(stored, query, stack)
+                    if text:
+                        payload, truncated = text_preview(source)
+                length = (len(payload) if payload is not None else display.get("preview_size", size)) if text else end - start + 1
+                content_type = display.get("content_type", "application/octet-stream") if preview else mimetypes.guess_type(filename)[0] or "application/octet-stream"
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(length))
+                self.send_header("Content-Disposition", ("inline" if preview else "attachment") + "; filename*=UTF-8''" + quote(filename, safe=""))
+                if preview:
+                    self.send_preview_security_headers()
+                else:
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                if text:
+                    self.send_header("X-Preview-Truncated", "true" if truncated else "false")
+                else:
+                    self.send_header("Accept-Ranges", "bytes")
+                    if status == HTTPStatus.PARTIAL_CONTENT:
+                        self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.end_headers()
+                if head_only:
+                    return
+                try:
+                    if payload is not None:
+                        self.wfile.write(payload)
+                    else:
+                        source.seek(start)
+                        remaining = length
+                        while remaining:
+                            chunk = source.read(min(CHUNK_SIZE, remaining))
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
+                except OSError as exc:
+                    self.log_error("Content transfer interrupted: %s", exc)
+        except StorageError as exc:
+            self.send_storage_error(exc)
+        except FileNotFoundError:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "File not found")
+        except (ValueError, UnicodeError) as exc:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+        except (OSError, zipfile.BadZipFile) as exc:
+            self.log_error("Could not read file %s: %s", stored.file_id, exc)
+            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "Could not read file")
 
     def send_preview_security_headers(self) -> None:
         self.send_header("Cache-Control", "no-store")
@@ -943,6 +1296,9 @@ class FluxDropHandler(BaseHTTPRequestHandler):
         if stored is None:
             self.send_preview_error(HTTPStatus.NOT_FOUND, "File not found")
             return
+        if self.config.cold_storage:
+            self.send_managed_content(stored, query, head_only=head_only, preview=True)
+            return
         with ExitStack() as stack:
             try:
                 source, filename, size = self.open_stored_content(stored, query, stack)
@@ -951,15 +1307,7 @@ class FluxDropHandler(BaseHTTPRequestHandler):
                 text_payload = None
                 truncated = False
                 if preview_type == "text":
-                    sample = source.read(MAX_TEXT_PREVIEW_BYTES + 1)
-                    truncated = len(sample) > MAX_TEXT_PREVIEW_BYTES
-                    text = codecs.getincrementaldecoder("utf-8")("replace").decode(
-                        sample[:MAX_TEXT_PREVIEW_BYTES], final=not truncated
-                    )
-                    text_payload = text.encode("utf-8")
-                    if len(text_payload) > MAX_TEXT_PREVIEW_BYTES:
-                        truncated = True
-                        text_payload = text_payload[:MAX_TEXT_PREVIEW_BYTES].decode("utf-8", errors="ignore").encode("utf-8")
+                    text_payload, truncated = text_preview(source)
             except (ValueError, UnicodeError) as exc:
                 self.send_preview_error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -1082,6 +1430,7 @@ def main() -> None:
         print("\nShutting down")
     finally:
         server.server_close()
+        config.close()
 
 
 if __name__ == "__main__":

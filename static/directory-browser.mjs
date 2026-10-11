@@ -9,7 +9,7 @@ export function directoryBreadcrumbs(name, path) {
   return crumbs;
 }
 
-export function setupDirectoryBrowser({ t, formatSize, api, onPreview, onAuthRequired }) {
+export function setupDirectoryBrowser({ t, formatSize, api, onPreview, onDownload, onAuthRequired }) {
   const $ = (id) => document.getElementById(id);
   const dialog = $("directory-dialog");
   const download = $("directory-download");
@@ -85,6 +85,10 @@ export function setupDirectoryBrowser({ t, formatSize, api, onPreview, onAuthReq
         if (url) link.href = url;
         else link.setAttribute("aria-disabled", "true");
         link.download = entry.filename;
+        link.addEventListener("click", (event) => {
+          if (!url) { event.preventDefault(); return; }
+          onDownload?.(entry, event);
+        });
         actions.append(link);
       }
       row.append(info, actions);
@@ -105,7 +109,10 @@ export function setupDirectoryBrowser({ t, formatSize, api, onPreview, onAuthReq
       const data = await api(`/api/directories/${encodeURIComponent(current.file_id)}?${query}`);
       if (version !== revision) return;
       if (!Array.isArray(data.entries)) throw new Error("Invalid directory response");
-      entries = data.entries;
+      entries = data.entries.map((entry) => typeof current.storage_state === "string" ? {
+        ...entry, storage_file_id: current.file_id,
+        storage_state: current.storage_state, storage_job: current.storage_job,
+      } : entry);
       statusKey = entries.length ? "" : "directoryEmpty";
     } catch (error) {
       if (version !== revision) return;
@@ -150,6 +157,9 @@ export function setupDirectoryBrowser({ t, formatSize, api, onPreview, onAuthReq
   $("directory-retry").addEventListener("click", () => void navigate(path));
   dialog.addEventListener("cancel", (event) => { event.preventDefault(); close(); });
   dialog.addEventListener("close", () => { if (!dialog.open) cleanup(); });
-  download.addEventListener("click", (event) => { if (!download.getAttribute("href")) event.preventDefault(); });
+  download.addEventListener("click", (event) => {
+    if (!download.getAttribute("href") || !current) { event.preventDefault(); return; }
+    onDownload?.({ ...current }, event);
+  });
   return { open, close, render };
 }

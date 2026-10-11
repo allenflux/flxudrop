@@ -1,0 +1,3 @@
+# Only needed when FLUXDROP_COLD_STORAGE_ENABLED=1. Docker includes these.
+boto3>=1.43,<2
+cryptography>=50.0.2,<51
