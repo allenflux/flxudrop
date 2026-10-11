@@ -52,8 +52,8 @@ th:first-child, td:first-child { padding-left: 0; }
 th:last-child, td:last-child { padding-right: 0; }
 th:nth-child(2) { width: 108px; }
 th:nth-child(3) { width: 160px; }
-th:nth-child(4) { width: 150px; }
-th:last-child { width: 200px; }
+th:nth-child(4) { width: 180px; }
+th:last-child { width: 170px; }
 .file-info strong { display: block; font-size: .875rem; font-weight: 500; overflow-wrap: anywhere; }
 .file-id { display: block; height: 1.125rem; margin-top: 4px; color: #777; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; line-height: 1.125rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-size, time { color: #666; font-variant-numeric: tabular-nums; }
@@ -65,12 +65,21 @@ th:last-child { width: 200px; }
 .row-action:hover:not(:disabled):not([aria-disabled="true"]), .row-action:focus-visible { color: #222; background: #f4f4f5; }
 .row-action-remove:hover:not(:disabled):not([aria-disabled="true"]), .row-action-remove:focus-visible { color: #a12626; background: #fbf2f2; }
 .row-action[aria-disabled="true"] { pointer-events: none; }
-.set-cold { grid-column: 1 / -1; justify-self: stretch; }
-.storage-status { display: block; color: #555; font-size: .8125rem; }
-.storage-progress { display: block; position: relative; width: 100%; height: 6px; margin: 7px 0; overflow: hidden; border-radius: 3px; background: #e5e5e5; }
-.storage-progress-fill { display: block; width: 0; height: 100%; background: #555; transition: width 320ms ease; }
+.storage-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 7px; min-width: 0; }
+.storage-status { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 7px; border-radius: 5px; background: #f2f3f3; color: #687077; font-size: .75rem; line-height: 1.4; overflow-wrap: anywhere; }
+.storage-status::before { content: ""; flex: none; width: 5px; height: 5px; border-radius: 50%; background: #949ca2; }
+.storage-status[data-state="hot"], .storage-status[data-state="hot_backed"], .storage-status[data-state="restoring"] { color: #806d4d; background: #f7f4ed; }
+.storage-status[data-state="hot"]::before, .storage-status[data-state="hot_backed"]::before, .storage-status[data-state="restoring"]::before { background: #aa8d5d; }
+.storage-status[data-state="cold"] { color: #536d82; background: #edf2f6; }
+.storage-status[data-state="cold"]::before { background: #7894a8; }
+.button.set-cold { display: inline-flex; align-items: center; gap: 4px; flex: none; min-height: 28px; padding: 3px 4px; border: 0; border-radius: 4px; color: #666; background: transparent; font-size: .75rem; font-weight: 400; white-space: nowrap; }
+.button.set-cold svg { flex: none; width: 14px; height: 14px; }
+.button.set-cold:hover:not(:disabled), .button.set-cold:focus-visible { color: #222; background: #f4f4f5; }
+.storage-progress { --storage-fill: linear-gradient(90deg, #958363, #6e879a); display: block; position: relative; width: 100%; height: 6px; margin: 7px 0; overflow: hidden; border-radius: 3px; background: #eceff1; }
+.storage-progress[data-kind="restore"] { --storage-fill: linear-gradient(90deg, #6e879a, #958363); }
+.storage-progress-fill { display: block; width: 0; height: 100%; background: var(--storage-fill); transition: width 320ms ease; }
 .storage-progress.is-indeterminate .storage-progress-fill { visibility: hidden; transition: none; }
-.storage-progress.is-indeterminate::after { content: ""; position: absolute; top: 0; left: 0; width: 32%; height: 100%; background: #555; animation: storage-activity 1.2s ease-in-out infinite; }
+.storage-progress.is-indeterminate::after { content: ""; position: absolute; top: 0; left: 0; width: 32%; height: 100%; background: var(--storage-fill); animation: storage-activity 1.2s ease-in-out infinite; }
 @keyframes storage-activity { from { transform: translateX(-110%); } to { transform: translateX(420%); } }
 @media (prefers-reduced-motion: reduce) {
   .storage-progress-fill { transition: none; }
@@ -155,6 +164,7 @@ textarea { display: block; width: 100%; min-height: 158px; resize: vertical; pad
   td.storage-cell { grid-column: 1 / -1; }
   .storage-progress { max-width: 220px; }
   .storage-task-actions .button { min-height: 40px; }
+  .button.set-cold { min-height: 40px; padding: 8px 4px; }
   .batch-actions { flex-wrap: wrap; }
   .button { min-height: 40px; }
   .row-actions { grid-template-columns: repeat(4, 44px); }

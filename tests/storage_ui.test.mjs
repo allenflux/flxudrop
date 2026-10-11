@@ -19,7 +19,7 @@ class Element {
     };
   }
   set textContent(value) { this.text = value; this.children = []; }
-  get textContent() { return this.text || ""; }
+  get textContent() { return this.text ?? this.children.map((child) => child.textContent || "").join(""); }
   set href(value) { this.setAttribute("href", value); }
   get href() { return this.getAttribute("href"); }
   set src(value) { this.setAttribute("src", value); }
@@ -114,12 +114,18 @@ test("cold files remain listed and hot rows expose a visible manual cold action"
   assert.equal(ui.rows().length, 2);
   const hot = ui.rows()[0];
   const cold = ui.rows()[1];
-  assert.equal(hot.children[3].children[0].textContent, "热文件");
-  assert.equal(cold.children[3].children[0].textContent, "冷文件");
-  assert.equal(hot.children[4].children[0].children[4].textContent, "设为冷文件");
-  assert.equal(hot.children[4].children[0].children[4].disabled, false);
-  assert.equal(cold.children[4].children[0].children[4].textContent, "已是冷文件");
-  assert.equal(cold.children[4].children[0].children[4].disabled, true);
+  assert.equal(hot.children[3].children[0].children[0].textContent, "热文件");
+  assert.equal(cold.children[3].children[0].children[0].textContent, "冷文件");
+  assert.equal(hot.children[3].children[0].children[1].textContent, "设为冷文件");
+  assert.equal(hot.children[3].children[0].children[1].disabled, false);
+  assert.equal(hot.children[3].children[0].children[1].hidden, false);
+  assert.match(hot.children[3].children[0].children[1].innerHTML, /<svg.*aria-hidden="true"/);
+  assert.equal(hot.children[3].children[0].children[1].getAttribute("aria-label"), "将 file-id.txt 设为冷文件");
+  assert.equal(hot.children[3].children[0].children[0].dataset.state, "hot");
+  assert.equal(cold.children[3].children[0].children[0].dataset.state, "cold");
+  assert.equal(cold.children[3].children[0].children[1].hidden, true);
+  assert.equal(cold.children[3].children[0].children[1].disabled, true);
+  assert.equal(hot.children[4].children[0].children.length, 4);
   assert.equal(ui.$("storage-config").hidden, true);
   assert.deepEqual(ui.requests.map((request) => request.path), ["/api/files"]);
 });
@@ -127,8 +133,10 @@ test("cold files remain listed and hot rows expose a visible manual cold action"
 test("disabled storage keeps manual controls visible with configuration guidance and legacy downloads", async (context) => {
   const ui = await harness(context, { ok: true, storage_enabled: false, files: [file(null)] });
   const actions = ui.rows()[0].children[4].children[0];
-  assert.equal(actions.children[4].textContent, "设为冷文件");
-  assert.equal(actions.children[4].disabled, true);
+  const cold = ui.rows()[0].children[3].children[0].children[1];
+  assert.equal(cold.textContent, "设为冷文件");
+  assert.equal(cold.disabled, true);
+  assert.equal(cold.hidden, false);
   assert.equal(ui.$("storage-config").hidden, false);
   assert.match(ui.$("storage-config").textContent, /S3.*加密主密钥/);
   const event = await actions.children[1].dispatch("click");
@@ -144,16 +152,18 @@ test("manual archive displays its queue position without fake progress and cance
     return { ok: true };
   });
   const row = ui.rows()[0];
-  await row.children[4].children[0].children[4].dispatch("click");
+  await row.children[3].children[0].children[1].dispatch("click");
   await tick();
-  assert.equal(row.children[3].children[0].textContent, "等待转冷 · 排队第 3 个");
+  assert.equal(row.children[3].children[0].children[0].textContent, "等待转冷 · 排队第 3 个");
   assert.equal(row.children[3].children[1].getAttribute("aria-valuenow"), null);
   assert.equal(row.children[3].children[1].classes.has("is-indeterminate"), true);
+  assert.equal(row.children[3].children[1].dataset.kind, "archive");
+  assert.equal(row.children[3].children[0].children[1].hidden, true);
   const cancel = row.children[3].children[3].children[0];
   assert.equal(cancel.hidden, false);
   await cancel.dispatch("click");
   await tick();
-  assert.equal(row.children[3].children[0].textContent, "热文件");
+  assert.equal(row.children[3].children[0].children[0].textContent, "热文件");
   assert.equal(cancel.hidden, true);
   assert.ok(ui.requests.some((request) => request.path === "/api/storage-jobs/archive-id/cancel" && request.method === "POST"));
 });
@@ -164,16 +174,16 @@ test("running phases show reported progress while retries show their reason and 
   const queued = { ...file("restoring", "queued"), storage_job: { state: "queued", kind: "restore", progress: 0, cancellable: false } };
   const ui = await harness(context, { ok: true, storage_enabled: true, files: [verifying, retry, queued] }, undefined, { manualPoll: true });
   const [first, second, third] = ui.rows().map((row) => row.children[3]);
-  assert.equal(first.children[0].textContent, "正在校验归档 · 63%");
+  assert.equal(first.children[0].children[0].textContent, "正在校验归档 · 63%");
   assert.equal(first.children[1].getAttribute("aria-valuenow"), "63");
   assert.equal(first.children[1].children[0].style.width, "63%");
-  assert.equal(second.children[0].textContent, "将在 12 秒后自动重试");
+  assert.equal(second.children[0].children[0].textContent, "将在 12 秒后自动重试");
   assert.equal(second.children[1].getAttribute("aria-valuenow"), null);
   assert.equal(second.children[2].hidden, false);
   assert.match(second.children[2].textContent, /S3 temporarily unavailable/);
   assert.equal(second.children[3].children[1].hidden, true);
-  assert.equal(third.children[0].textContent, "等待恢复");
-  assert.doesNotMatch(third.children[0].textContent, /0%/);
+  assert.equal(third.children[0].children[0].textContent, "等待恢复");
+  assert.doesNotMatch(third.children[0].children[0].textContent, /0%/);
 });
 
 test("completed archive responses update a whole queue and remain correct across pagination", async (context) => {
@@ -184,12 +194,12 @@ test("completed archive responses update a whole queue and remain correct across
   const ui = await harness(context, { ok: true, storage_enabled: true, files }, () => ({
     ok: true, storage_state: "cold", storage_job: { state: "completed", kind: "archive", progress: 100, cancellable: false },
   }), { manualPoll: true });
-  assert.equal(ui.rows()[0].children[3].children[0].textContent, "等待转冷");
+  assert.equal(ui.rows()[0].children[3].children[0].children[0].textContent, "等待转冷");
   await ui.poll();
   assert.equal(ui.requests.length, 26);
   assert.ok(ui.requests.every((request) => request.cache === "no-store"));
   for (const row of ui.rows()) {
-    assert.equal(row.children[3].children[0].textContent, "冷文件");
+    assert.equal(row.children[3].children[0].children[0].textContent, "冷文件");
     assert.equal(row.children[3].children[1].hidden, false);
     assert.equal(row.children[3].children[1].getAttribute("aria-valuenow"), "100");
     assert.equal(row.children[3].children[1].children[0].style.width, "100%");
@@ -198,7 +208,7 @@ test("completed archive responses update a whole queue and remain correct across
   for (const row of ui.rows()) assert.equal(row.children[3].children[1].hidden, true);
   await ui.$("next-page").dispatch("click");
   assert.equal(ui.rows().length, 5);
-  for (const row of ui.rows()) assert.equal(row.children[3].children[0].textContent, "冷文件");
+  for (const row of ui.rows()) assert.equal(row.children[3].children[0].children[0].textContent, "冷文件");
   assert.equal(ui.pendingPolls(), 0);
 });
 
@@ -211,12 +221,12 @@ test("an immediate completed POST animates completion, while historical complete
   const bar = row.children[3].children[1];
   assert.equal(bar.hidden, true);
   assert.equal(ui.completionTimers.length, 0);
-  await row.children[4].children[0].children[4].dispatch("click");
+  await row.children[3].children[0].children[1].dispatch("click");
   await tick();
-  assert.equal(row.children[3].children[0].textContent, "冷文件");
+  assert.equal(row.children[3].children[0].children[0].textContent, "冷文件");
   assert.equal(bar.hidden, false);
   assert.equal(bar.children[0].style.width, "100%");
-  assert.equal(row.children[4].children[0].children[4].textContent, "已是冷文件");
+  assert.equal(row.children[3].children[0].children[1].hidden, true);
   assert.equal(ui.completionTimers.length, 1);
   ui.finishAnimations();
   assert.equal(bar.hidden, true);
@@ -230,7 +240,7 @@ test("a completion timer cannot hide a new restore or repopulate a locked page",
   }, { manualPoll: true });
   const row = ui.rows()[0];
   const bar = row.children[3].children[1];
-  await row.children[4].children[0].children[4].dispatch("click");
+  await row.children[3].children[0].children[1].dispatch("click");
   await tick();
   const previousTimer = ui.completionTimers[0];
   assert.ok(previousTimer);
@@ -241,7 +251,8 @@ test("a completion timer cannot hide a new restore or repopulate a locked page",
   assert.equal(bar.hidden, false);
   assert.equal(bar.classes.has("is-indeterminate"), true);
   assert.equal(bar.getAttribute("aria-valuenow"), null);
-  assert.equal(row.children[3].children[0].textContent, "正在恢复");
+  assert.equal(bar.dataset.kind, "restore");
+  assert.equal(row.children[3].children[0].children[0].textContent, "正在恢复");
   await ui.$("logout").dispatch("click");
   previousTimer.callback();
   assert.equal(ui.rows().length, 0);
@@ -253,7 +264,7 @@ test("refresh and logout cancel completion holds without replaying historical co
   const ui = await harness(context, initial, () => ({
     ok: true, storage_state: "hot_backed", storage_job: { job_id: `archive-${++job}`, state: "completed", kind: "archive", progress: 100, cancellable: false },
   }), { manualPoll: true });
-  await ui.rows()[0].children[4].children[0].children[4].dispatch("click");
+  await ui.rows()[0].children[3].children[0].children[1].dispatch("click");
   await tick();
   const refreshTimer = ui.completionTimers[0];
   assert.equal(ui.rows()[0].children[3].children[1].hidden, false);
@@ -261,7 +272,7 @@ test("refresh and logout cancel completion holds without replaying historical co
   assert.equal(refreshTimer.cancelled, true);
   refreshTimer.callback();
   assert.equal(ui.rows()[0].children[3].children[1].hidden, true);
-  await ui.rows()[0].children[4].children[0].children[4].dispatch("click");
+  await ui.rows()[0].children[3].children[0].children[1].dispatch("click");
   await tick();
   const logoutTimer = ui.completionTimers[1];
   assert.equal(ui.rows()[0].children[3].children[1].hidden, false);
@@ -286,11 +297,11 @@ test("refresh reconstructs a queued task and continues polling the same job thro
   assert.notEqual(ui.rows()[0], beforeRefresh);
   assert.equal(ui.pendingPolls(), 1);
   await ui.poll();
-  assert.equal(ui.rows()[0].children[3].children[0].textContent, "正在上传 · 45%");
+  assert.equal(ui.rows()[0].children[3].children[0].children[0].textContent, "正在上传 · 45%");
   await ui.$("refresh").dispatch("click");
-  assert.equal(ui.rows()[0].children[3].children[0].textContent, "正在上传 · 45%");
+  assert.equal(ui.rows()[0].children[3].children[0].children[0].textContent, "正在上传 · 45%");
   await ui.poll();
-  assert.equal(ui.rows()[0].children[3].children[0].textContent, "冷文件");
+  assert.equal(ui.rows()[0].children[3].children[0].children[0].textContent, "冷文件");
   assert.equal(ui.rows()[0].children[3].children[1].getAttribute("aria-valuenow"), "100");
   assert.equal(ui.pendingPolls(), 0);
   assert.ok(ui.requests.filter((request) => request.path.endsWith("/storage")).every((request) => request.path === "/api/files/file-id/storage"));
@@ -310,7 +321,7 @@ test("a late status error cannot overwrite a completed row supplied by refresh",
   await ui.$("refresh").dispatch("click");
   failRead(new Error("Old request failed"));
   await polling;
-  assert.equal(ui.rows()[0].children[3].children[0].textContent, "冷文件");
+  assert.equal(ui.rows()[0].children[3].children[0].children[0].textContent, "冷文件");
   assert.equal(ui.rows()[0].children[3].children[2].hidden, true);
   assert.equal(ui.pendingPolls(), 0);
 });

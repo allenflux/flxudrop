@@ -308,6 +308,7 @@ function updateStorageRow(file, controls, removed) {
   const percent = !submitting && job?.state === "running" ? storageProgress(job) : null;
   if (percent > 0) label += ` · ${percent}%`;
   controls.storageStatus.textContent = label;
+  controls.storageStatus.dataset.state = current;
   updateStorageProgress(file, controls, { active, submitting, percent, label, removed });
   controls.storageError.hidden = !error || removed;
   controls.storageError.textContent = error ? storageErrorMessage(error) : "";
@@ -315,7 +316,8 @@ function updateStorageRow(file, controls, removed) {
   controls.storageRetry.disabled = deleting || (!storageEnabled && isHot(file));
   controls.storageCancel.hidden = !active || !job.cancellable || removed;
   controls.storageCancel.disabled = deleting;
-  controls.cold.textContent = t(current === "cold" ? "alreadyCold" : "setCold");
+  controls.coldLabel.textContent = t("setCold");
+  controls.cold.hidden = !isHot(file) || active;
   controls.cold.disabled = removed || deleting || uploads.isBusy() || !storageEnabled || submitting || active || !isHot(file);
   controls.cold.title = storageEnabled ? t("setColdNamed", { name: file.filename }) : t("storageDisabled");
 }
@@ -332,6 +334,7 @@ function updateStorageProgress(file, controls, { active, submitting, percent, la
   const visual = controls.storageVisual;
   const bar = controls.storageProgress;
   const job = file.storage_job;
+  bar.dataset.kind = job?.kind || "archive";
   const jobId = job?.job_id || null;
   const changedJob = visual.jobId !== jobId;
   const completed = job?.state === "completed" && storageProgress(job) === 100;
@@ -486,6 +489,19 @@ function renderFiles() {
     const storageStatus = document.createElement("span");
     storageStatus.className = "storage-status";
     storageStatus.setAttribute("role", "status");
+    const storageHeading = document.createElement("div");
+    storageHeading.className = "storage-heading";
+    const cold = document.createElement("button");
+    cold.type = "button";
+    cold.className = "button set-cold";
+    cold.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9M9 4.5l3 3 3-3M9 19.5l3-3 3 3"/></svg>';
+    const coldLabel = document.createElement("span");
+    coldLabel.className = "set-cold-label";
+    coldLabel.textContent = t("setCold");
+    cold.append(coldLabel);
+    cold.setAttribute("aria-label", t("setColdNamed", { name: file.filename }));
+    cold.addEventListener("click", () => void setCold(file));
+    storageHeading.append(storageStatus, cold);
     const storageProgressElement = document.createElement("span");
     storageProgressElement.className = "storage-progress";
     storageProgressElement.setAttribute("role", "progressbar");
@@ -511,7 +527,7 @@ function renderFiles() {
     storageRetry.textContent = t("retryStorage");
     storageRetry.addEventListener("click", () => void retryStorage(file));
     storageTaskActions.append(storageCancel, storageRetry);
-    storageCell.append(storageStatus, storageProgressElement, storageErrorElement, storageTaskActions);
+    storageCell.append(storageHeading, storageProgressElement, storageErrorElement, storageTaskActions);
     const actionsCell = document.createElement("td");
     const actions = document.createElement("div");
     actions.className = "file-actions row-actions";
@@ -547,16 +563,10 @@ function renderFiles() {
     decorateRowAction(remove, "remove", t("remove"));
     remove.setAttribute("aria-label", t("deleteFile", { name: file.filename }));
     remove.addEventListener("click", () => openDeleteDialog([file]));
-    const cold = document.createElement("button");
-    cold.type = "button";
-    cold.className = "button set-cold";
-    cold.textContent = t("setCold");
-    cold.setAttribute("aria-label", t("setColdNamed", { name: file.filename }));
-    cold.addEventListener("click", () => void setCold(file));
-    actions.append(previewButton, download, copy, remove, cold);
+    actions.append(previewButton, download, copy, remove);
     actionsCell.append(actions);
     row.append(nameCell, size, created, storageCell, actionsCell);
-    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove, preview: previewButton, copy, cold, storageStatus, storageProgress: storageProgressElement, storageProgressFill, storageVisual: { jobId: null, busy: false, active: false, completing: false, timer: null, version: 0 }, storageError: storageErrorElement, storageCancel, storageRetry });
+    visibleRows.set(file.file_id, { row, checkbox, status: id, download, remove, preview: previewButton, copy, cold, coldLabel, storageStatus, storageProgress: storageProgressElement, storageProgressFill, storageVisual: { jobId: null, busy: false, active: false, completing: false, timer: null, version: 0 }, storageError: storageErrorElement, storageCancel, storageRetry });
     updateRow(file);
     fragment.append(row);
   }

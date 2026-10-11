@@ -40,6 +40,13 @@ docker compose down
 
 The compose file maps host port `8090` to container port `8090`, stores uploaded files in the Docker volume `fluxdrop-data`, and returns links under `http://allenflux.tech:8090`.
 
+Update production through Git: commit and push changes first, then run the following in the server checkout. Keep `.env`, `secrets/`, and the persistent data volume on the server.
+
+```bash
+git pull --ff-only origin main
+docker compose up -d --build fluxdrop
+```
+
 ## Upload With Curl
 
 Upload directly (streams to disk):
@@ -176,6 +183,8 @@ curl -H 'Authorization: Bearer change-me' -T ./file.log http://allenflux.tech:80
 ## 冷热存储
 
 冷热存储默认关闭，现有启动方式和文件链接继续可用。启用后，距最近内容访问、内容修改和上传时间均超过七天的文件会自动迁冷；页面的每行操作和选择工具栏提供 **设为冷文件**，可手动或批量提前迁冷。手动操作仅跳过时间门槛，上传、回读验证与安全删除规则相同。页面显示冷热状态、任务进度、失败原因，并支持取消或重试。
+
+冷热状态使用低饱和的暖金与灰蓝标记，紧凑的手动转冷入口放在状态旁。热转冷进度采用暖色到冷色的渐变，回热方向相反；页面其余部分沿用原有简洁布局。
 
 排队时显示队列位置；开始执行后显示准备、上传、回读校验和转冷阶段。百分比按已完成的原始块更新，包含上传与回读校验，不表示实时网络传输速度。小文件可能在两次查询之间直接完成：等待期间显示活动动画，收到完成状态后平滑填满进度条，短暂停留再收起。页面优先刷新可见任务，并限制状态查询并发；S3 重试会展示失败原因和剩余等待秒数。
 
